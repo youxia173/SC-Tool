@@ -1,0 +1,29 @@
+# Cargo build output
+/target/
+**/*.rs.bk
+
+# Release / distribution binaries
+/发布版本/
+*.exe
+*.zip
+*.pdb
+*.dll
+
+# Runtime config next to the binary
+*.cfg
+
+# IDE / editor
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*~
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local tools
+/.claude/
+/.cursor/
