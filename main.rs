@@ -15,6 +15,10 @@ mod screenshot;
 mod config;
 mod settings;
 mod toast;
+mod baidu;
+mod tencent;
+mod aliyun;
+mod translate;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -31,7 +35,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 显示名称（托盘 / 菜单 / 窗口标题）
-const APP_TITLE: &str = "SC 小工具v1.1.0";
+const APP_TITLE: &str = "SC 小工具v1.2.0";
 
 // ============ 你唯一需要改的地方 ============
 
@@ -204,6 +208,9 @@ fn main() -> Result<()> {
             }
         }
 
+        // 每次启动软件时自动打开设置
+        settings::open(main);
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg); // WM_CHAR / IME 需要它
@@ -227,6 +234,10 @@ unsafe extern "system" fn low_level_kb_proc(
             let wake_vk = config::WAKE_VK.load(Ordering::SeqCst);
             let shot_vk = config::SHOT_VK.load(Ordering::SeqCst);
 
+            if pressed && !injected {
+                settings::on_global_key(kb.vkCode);
+            }
+
             // —— 唤醒输入框 ——
             if wake_vk != 0
                 && kb.vkCode == wake_vk
@@ -237,15 +248,15 @@ unsafe extern "system" fn low_level_kb_proc(
                 let main = load(&MAIN_HWND);
                 if !is_null(main)
                     && !IsWindowVisible(main).as_bool()
-                    && is_star_citizen_foreground()
+                    && can_activate_overlay()
                 {
                     let fg = GetForegroundWindow();
                     if !is_null(fg) {
                         store(&GAME_HWND, fg);
                     }
                     let _ = PostMessageW(main, WM_HOTKEY, WPARAM(1), LPARAM(0));
-                    // 非 Enter：吞掉热键，由消息处理里模拟回车开聊天
-                    if wake_vk != 0x0D {
+                    // 非 Enter，或测试模式：吞掉热键，避免干扰当前窗口
+                    if wake_vk != 0x0D || config::test_mode_enabled() {
                         return LRESULT(1);
                     }
                 }
@@ -277,6 +288,22 @@ unsafe extern "system" fn low_level_kb_proc(
         }
     }
     CallNextHookEx(HHOOK(std::ptr::null_mut()), ncode, wparam, lparam)
+}
+
+/// 可否唤醒输入框：正常模式需 SC 前台；测试模式任意前台（排除本程序窗口）
+unsafe fn can_activate_overlay() -> bool {
+    if config::test_mode_enabled() {
+        if settings::is_open() {
+            return false;
+        }
+        let fg = GetForegroundWindow();
+        let main = load(&MAIN_HWND);
+        if is_null(fg) || fg == main {
+            return false;
+        }
+        return true;
+    }
+    is_star_citizen_foreground()
 }
 
 /// 当前前台窗口是否属于星际公民（按进程名判断）
@@ -364,8 +391,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 return LRESULT(0);
             }
 
-            // 再确认一次前台是 SC，防止消息排队期间切走了窗口
-            if !is_star_citizen_foreground() {
+            let test = config::test_mode_enabled();
+            // 再确认一次可唤醒，防止消息排队期间切走了窗口
+            if !test && !is_star_citizen_foreground() {
                 return LRESULT(0);
             }
 
@@ -375,35 +403,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
 
             let wake_vk = config::WAKE_VK.load(Ordering::SeqCst);
-            if wake_vk != 0x0D {
+            if !test && wake_vk != 0x0D {
                 // 自定义热键：自动模拟 Enter，让游戏打开聊天
                 SENDING.store(true, Ordering::SeqCst);
                 type_key(0x1C);
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 SENDING.store(false, Ordering::SeqCst);
-            } else {
+            } else if !test && wake_vk == 0x0D {
                 // 默认 Enter：稍等让游戏先吃掉这次回车
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
 
-            // 用 AttachThreadInput 突破前台锁，再弹出输入框抢焦点
-            let cur = GetCurrentThreadId();
-            let fg = GetForegroundWindow();
-            let fg_tid = GetWindowThreadProcessId(fg, None);
-            if fg_tid != 0 {
-                let _ = AttachThreadInput(cur, fg_tid, true);
-            }
-
-            position_overlay(main);
-            let _ = ShowWindow(main, SW_SHOW);
-            let _ = SetForegroundWindow(main);
-            let _ = SetActiveWindow(main);
-            let _ = SetWindowTextW(edit, w!(""));
-            let _ = SetFocus(edit);
-
-            if fg_tid != 0 {
-                let _ = AttachThreadInput(cur, fg_tid, false);
-            }
+            show_input_overlay(main, edit);
             LRESULT(0)
         }
 
@@ -531,7 +542,16 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(title_wide.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("作者:游侠173"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, IDM_SETTINGS as usize, w!("设置"));
+    let settings_label: Vec<u16> = config::settings_menu_label()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        IDM_SETTINGS as usize,
+        PCWSTR(settings_label.as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT as usize, w!("退出"));
     // 托盘菜单惯例：先置前台，结束后再发 WM_NULL，否则菜单可能点不掉
     let _ = SetForegroundWindow(hwnd);
@@ -645,6 +665,27 @@ unsafe fn on_submit() {
     do_send_and_close(&text);
 }
 
+/// 弹出输入叠加窗并抢焦点
+unsafe fn show_input_overlay(main: HWND, edit: HWND) {
+    let cur = GetCurrentThreadId();
+    let fg = GetForegroundWindow();
+    let fg_tid = GetWindowThreadProcessId(fg, None);
+    if fg_tid != 0 {
+        let _ = AttachThreadInput(cur, fg_tid, true);
+    }
+
+    position_overlay(main);
+    let _ = ShowWindow(main, SW_SHOW);
+    let _ = SetForegroundWindow(main);
+    let _ = SetActiveWindow(main);
+    let _ = SetWindowTextW(edit, w!(""));
+    let _ = SetFocus(edit);
+
+    if fg_tid != 0 {
+        let _ = AttachThreadInput(cur, fg_tid, false);
+    }
+}
+
 /// use_esc: true 用 Esc 关游戏聊天；false 用 Enter（空聊天关窗）
 unsafe fn close_overlay_and_chat(use_esc: bool) {
     let edit = load(&EDIT_HWND);
@@ -653,7 +694,7 @@ unsafe fn close_overlay_and_chat(use_esc: bool) {
 
     SENDING.store(true, Ordering::SeqCst);
 
-    if !is_null(game) && focus_game(game) {
+    if !config::test_mode_enabled() && !is_null(game) && focus_game(game) {
         std::thread::sleep(std::time::Duration::from_millis(120));
         if use_esc {
             type_key(0x01); // Esc
@@ -679,41 +720,111 @@ unsafe fn focus_game(game: HWND) -> bool {
     false
 }
 
-/// 有内容：转译 → 剪贴板 → Ctrl+V 粘贴 → Enter 发送（聊天关闭）→ 关叠加窗
+/// 有内容：转译后发送；测试模式写入 txt，正常模式粘贴进游戏
 unsafe fn do_send_and_close(text: &str) {
     let edit = load(&EDIT_HWND);
     let main = load(&MAIN_HWND);
     let game = load(&GAME_HWND);
-    let payload = translate(text);
+    let zh_payload = translate(text);
+
+    // 双语：先请求翻译（可能稍慢），失败则仅发中文并提示
+    let en_line = if config::bilingual_enabled() {
+        match translate::zh_to_en(text) {
+            Ok(en) => Some(format!("[en] {en}")),
+            Err(e) => {
+                if config::test_mode_enabled() {
+                    let tw: Vec<u16> = e.encode_utf16().chain(std::iter::once(0)).collect();
+                    let _ = MessageBoxW(
+                        main,
+                        PCWSTR(tw.as_ptr()),
+                        w!("翻译失败"),
+                        MB_OK | MB_ICONWARNING,
+                    );
+                } else if !is_null(game) {
+                    let short = if e.chars().count() > 28 {
+                        format!("{}…", e.chars().take(27).collect::<String>())
+                    } else {
+                        e.clone()
+                    };
+                    toast::show(game, &short, false);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 中英同一条消息：用换行拼在一起，只粘贴发送一次
+    let payload = match en_line.as_deref() {
+        Some(en) => format!("{zh_payload}\n{en}"),
+        None => zh_payload,
+    };
 
     SENDING.store(true, Ordering::SeqCst);
 
-    // 先写入剪贴板，再切回游戏（避免切焦后偶发写剪贴板失败）
-    if clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &payload).is_err() {
+    if config::test_mode_enabled() {
+        match append_test_output(&payload) {
+            Ok(path) => {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("SC-Tool-test.txt");
+                notify_tray(main, "已写入测试文件", name, false);
+            }
+            Err(e) => {
+                let tw: Vec<u16> = format!("写入失败: {e}")
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let _ = MessageBoxW(main, PCWSTR(tw.as_ptr()), w!("测试模式"), MB_OK | MB_ICONWARNING);
+                SENDING.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    } else if !paste_send_line(&payload, game) {
         SENDING.store(false, Ordering::SeqCst);
         return;
     }
 
-    if !is_null(game) {
-        if !focus_game(game) {
-            // 没切过去就放弃，不清空 edit，用户可以再试
-            SENDING.store(false, Ordering::SeqCst);
-            return;
-        }
+    let _ = SetWindowTextW(edit, w!(""));
+    let _ = ShowWindow(main, SW_HIDE);
+    SENDING.store(false, Ordering::SeqCst);
+}
+
+fn append_test_output(payload: &str) -> std::result::Result<std::path::PathBuf, String> {
+    use std::io::Write;
+    let path = config::test_out_path();
+    let new_file = !path.exists();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    if new_file {
+        // UTF-8 BOM，方便记事本识别中文
+        f.write_all(&[0xEF, 0xBB, 0xBF]).map_err(|e| e.to_string())?;
     }
+    writeln!(f, "========").map_err(|e| e.to_string())?;
+    writeln!(f, "{payload}").map_err(|e| e.to_string())?;
+    writeln!(f).map_err(|e| e.to_string())?;
+    Ok(path)
+}
 
-    // 等游戏从失焦中恢复
+/// 写入剪贴板 → 聚焦游戏 → Ctrl+V → Enter。失败返回 false（不清空输入框）。
+unsafe fn paste_send_line(payload: &str, game: HWND) -> bool {
+    if clipboard_win::set_clipboard(clipboard_win::formats::Unicode, payload).is_err() {
+        return false;
+    }
+    if !is_null(game) && !focus_game(game) {
+        return false;
+    }
     std::thread::sleep(std::time::Duration::from_millis(250));
-
-    type_ctrl_v(); // 粘贴整段转译串，避免逐字扫描码丢键乱码
+    type_ctrl_v();
     std::thread::sleep(std::time::Duration::from_millis(80));
     type_key(0x1C); // Enter → 发送并关闭 SC 聊天框
     std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let _ = SetWindowTextW(edit, w!(""));
-    let _ = ShowWindow(main, SW_HIDE);
-
-    SENDING.store(false, Ordering::SeqCst);
+    true
 }
 
 unsafe fn type_key(sc: u16) {

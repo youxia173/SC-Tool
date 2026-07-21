@@ -11,6 +11,7 @@
 
 # Runtime config next to the binary
 *.cfg
+SC-Tool-test.txt
 
 # IDE / editor
 .idea/
