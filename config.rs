@@ -116,15 +116,140 @@ impl Provider {
     }
 }
 
+/// 翻译提示相对框选聊天区的位置
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ToastPos {
+    Above = 0,
+    Right = 1,
+    Below = 2,
+}
+
+impl ToastPos {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Right,
+            2 => Self::Below,
+            _ => Self::Above,
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    pub fn cfg_name(self) -> &'static str {
+        match self {
+            Self::Above => "above",
+            Self::Right => "right",
+            Self::Below => "below",
+        }
+    }
+
+    pub fn from_cfg(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "right" | "右侧" | "右" => Self::Right,
+            "below" | "bottom" | "下方" | "下" => Self::Below,
+            _ => Self::Above,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Above => "框选区域上方",
+            Self::Right => "框选区域右侧",
+            Self::Below => "框选区域下方",
+        }
+    }
+}
+
+/// 设置窗口主题
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum UiTheme {
+    Dark = 0,
+    Light = 1,
+    /// 赛博朋克霓虹（极）
+    Cyber = 2,
+}
+
+impl UiTheme {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Light,
+            2 => Self::Cyber,
+            _ => Self::Dark,
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    pub fn cfg_name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Cyber => "cyber",
+        }
+    }
+
+    pub fn from_cfg(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "light" | "white" | "亮" | "浅色" | "白" => Self::Light,
+            "cyber" | "neon" | "punk" | "极" | "赛博" => Self::Cyber,
+            _ => Self::Dark,
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Cyber,
+            Self::Cyber => Self::Dark,
+        }
+    }
+
+    pub fn button_label(self) -> &'static str {
+        match self {
+            Self::Dark => "暗",
+            Self::Light => "浅",
+            Self::Cyber => "极",
+        }
+    }
+}
+
 pub const DEFAULT_WAKE_VK: u32 = 0x0D; // Enter
 pub const DEFAULT_SHOT_VK: u32 = 0x79; // F10
+pub const DEFAULT_PICK_VK: u32 = 0; // 未设置
+pub const DEFAULT_OCR_VK: u32 = 0x78; // F9
+pub const DEFAULT_SETTINGS_VK: u32 = 0x24; // Home
 pub const VK_NONE: u32 = 0;
+pub const DEFAULT_TOAST_BG: u32 = 0x00FFFFFF;
+pub const DEFAULT_TOAST_FG: u32 = 0x00000000;
+pub const DEFAULT_TOAST_ALPHA: u32 = 204;
+pub const DEFAULT_TOAST_SECS: u32 = 20;
 
 pub static WAKE_VK: AtomicU32 = AtomicU32::new(DEFAULT_WAKE_VK);
 pub static SHOT_VK: AtomicU32 = AtomicU32::new(DEFAULT_SHOT_VK);
+pub static PICK_VK: AtomicU32 = AtomicU32::new(DEFAULT_PICK_VK);
+pub static OCR_VK: AtomicU32 = AtomicU32::new(DEFAULT_OCR_VK);
+pub static SETTINGS_VK: AtomicU32 = AtomicU32::new(DEFAULT_SETTINGS_VK);
 pub static TOAST_ENABLED: AtomicBool = AtomicBool::new(true);
 pub static SOUND_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static BILINGUAL_ENABLED: AtomicBool = AtomicBool::new(false);
+/// 提示背景色 RRGGBB（默认白）
+pub static TOAST_BG: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_BG);
+/// 提示文字色 RRGGBB（默认黑）
+pub static TOAST_FG: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_FG);
+/// 提示不透明度 0–255
+pub static TOAST_ALPHA: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_ALPHA);
+/// 翻译/OCR 提示显示秒数
+pub static TOAST_SECS: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_SECS);
+/// 翻译提示相对聊天区位置
+pub static TOAST_POS: AtomicU32 = AtomicU32::new(ToastPos::Below as u32);
+/// 设置窗口主题（默认深色）
+pub static UI_THEME: AtomicU32 = AtomicU32::new(UiTheme::Dark as u32);
 /// 测试模式（仅运行时，不写配置；设置窗口输入秘籍开启）
 pub static TEST_MODE: AtomicBool = AtomicBool::new(false);
 pub static TRANSLATE_PROVIDER: AtomicU32 = AtomicU32::new(0);
@@ -135,6 +260,42 @@ static TENCENT_SECRET_ID: Mutex<String> = Mutex::new(String::new());
 static TENCENT_SECRET_KEY: Mutex<String> = Mutex::new(String::new());
 static ALIYUN_AK_ID: Mutex<String> = Mutex::new(String::new());
 static ALIYUN_AK_SECRET: Mutex<String> = Mutex::new(String::new());
+static CHAT_RECT: Mutex<ChatRect> = Mutex::new(ChatRect::empty());
+
+/// 屏幕坐标下的聊天区矩形（一次框选，可重选）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChatRect {
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl ChatRect {
+    pub const fn empty() -> Self {
+        Self {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    pub fn is_set(self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
+    pub fn label(self) -> String {
+        if self.is_set() {
+            format!(
+                "聊天区：({},{}) {}×{}",
+                self.left, self.top, self.width, self.height
+            )
+        } else {
+            "聊天区：未框选".into()
+        }
+    }
+}
 
 pub fn load() {
     let path = config_path();
@@ -143,9 +304,18 @@ pub fn load() {
     };
     let mut wake = DEFAULT_WAKE_VK;
     let mut shot = DEFAULT_SHOT_VK;
+    let mut pick = DEFAULT_PICK_VK;
+    let mut ocr_vk = DEFAULT_OCR_VK;
+    let mut settings_vk = DEFAULT_SETTINGS_VK;
     let mut toast = true;
     let mut sound = false;
     let mut bilingual = false;
+    let mut toast_bg = DEFAULT_TOAST_BG;
+    let mut toast_fg = DEFAULT_TOAST_FG;
+    let mut toast_alpha = DEFAULT_TOAST_ALPHA;
+    let mut toast_secs = DEFAULT_TOAST_SECS;
+    let mut toast_pos = ToastPos::Below;
+    let mut ui_theme = UiTheme::Dark;
     let mut provider = Provider::Baidu;
     let mut baidu_id = String::new();
     let mut baidu_secret = String::new();
@@ -153,6 +323,7 @@ pub fn load() {
     let mut tc_key = String::new();
     let mut ali_id = String::new();
     let mut ali_secret = String::new();
+    let mut chat = ChatRect::empty();
 
     for line in text.lines() {
         let line = line.trim();
@@ -168,12 +339,52 @@ pub fn load() {
                     shot = n;
                 }
             }
+        } else if let Some(v) = line.strip_prefix("pick_vk=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                if n == VK_NONE || is_allowed_vk(n) {
+                    pick = n;
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("ocr_vk=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                if n == VK_NONE || is_allowed_vk(n) {
+                    ocr_vk = n;
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("settings_vk=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                if n == VK_NONE || is_allowed_vk(n) {
+                    settings_vk = n;
+                }
+            }
         } else if let Some(v) = line.strip_prefix("toast=") {
             toast = parse_bool(v, true);
         } else if let Some(v) = line.strip_prefix("sound=") {
             sound = parse_bool(v, false);
         } else if let Some(v) = line.strip_prefix("bilingual=") {
             bilingual = parse_bool(v, false);
+        } else if let Some(v) = line.strip_prefix("toast_bg=") {
+            let s = v.trim().trim_start_matches('#').trim_start_matches("0x");
+            if let Ok(n) = u32::from_str_radix(s, 16) {
+                toast_bg = n & 0x00FF_FFFF;
+            }
+        } else if let Some(v) = line.strip_prefix("toast_fg=") {
+            let s = v.trim().trim_start_matches('#').trim_start_matches("0x");
+            if let Ok(n) = u32::from_str_radix(s, 16) {
+                toast_fg = n & 0x00FF_FFFF;
+            }
+        } else if let Some(v) = line.strip_prefix("toast_alpha=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                toast_alpha = n.min(255);
+            }
+        } else if let Some(v) = line.strip_prefix("toast_secs=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                toast_secs = clamp_toast_secs(n);
+            }
+        } else if let Some(v) = line.strip_prefix("toast_pos=") {
+            toast_pos = ToastPos::from_cfg(v);
+        } else if let Some(v) = line.strip_prefix("ui_theme=") {
+            ui_theme = UiTheme::from_cfg(v);
         } else if let Some(v) = line.strip_prefix("translate_provider=") {
             provider = Provider::from_cfg(v);
         } else if let Some(v) = line.strip_prefix("baidu_app_id=") {
@@ -188,6 +399,22 @@ pub fn load() {
             ali_id = unescape_cfg(v.trim());
         } else if let Some(v) = line.strip_prefix("aliyun_access_key_secret=") {
             ali_secret = unescape_cfg(v.trim());
+        } else if let Some(v) = line.strip_prefix("chat_left=") {
+            if let Ok(n) = v.trim().parse() {
+                chat.left = n;
+            }
+        } else if let Some(v) = line.strip_prefix("chat_top=") {
+            if let Ok(n) = v.trim().parse() {
+                chat.top = n;
+            }
+        } else if let Some(v) = line.strip_prefix("chat_width=") {
+            if let Ok(n) = v.trim().parse() {
+                chat.width = n;
+            }
+        } else if let Some(v) = line.strip_prefix("chat_height=") {
+            if let Ok(n) = v.trim().parse() {
+                chat.height = n;
+            }
         }
         // 忽略旧版 test_mode= 配置行
     }
@@ -198,9 +425,18 @@ pub fn load() {
 
     WAKE_VK.store(wake, Ordering::SeqCst);
     SHOT_VK.store(shot, Ordering::SeqCst);
+    PICK_VK.store(pick, Ordering::SeqCst);
+    OCR_VK.store(ocr_vk, Ordering::SeqCst);
+    SETTINGS_VK.store(settings_vk, Ordering::SeqCst);
     TOAST_ENABLED.store(toast, Ordering::SeqCst);
     SOUND_ENABLED.store(sound, Ordering::SeqCst);
     BILINGUAL_ENABLED.store(bilingual, Ordering::SeqCst);
+    TOAST_BG.store(toast_bg, Ordering::SeqCst);
+    TOAST_FG.store(toast_fg, Ordering::SeqCst);
+    TOAST_ALPHA.store(toast_alpha, Ordering::SeqCst);
+    TOAST_SECS.store(toast_secs, Ordering::SeqCst);
+    TOAST_POS.store(toast_pos.as_u32(), Ordering::SeqCst);
+    UI_THEME.store(ui_theme.as_u32(), Ordering::SeqCst);
     TRANSLATE_PROVIDER.store(provider.as_u32(), Ordering::SeqCst);
     set_mutex(&BAIDU_APP_ID, baidu_id);
     set_mutex(&BAIDU_SECRET, baidu_secret);
@@ -208,6 +444,9 @@ pub fn load() {
     set_mutex(&TENCENT_SECRET_KEY, tc_key);
     set_mutex(&ALIYUN_AK_ID, ali_id);
     set_mutex(&ALIYUN_AK_SECRET, ali_secret);
+    if let Ok(mut g) = CHAT_RECT.lock() {
+        *g = chat;
+    }
 }
 
 fn set_mutex(m: &Mutex<String>, v: String) {
@@ -256,9 +495,18 @@ fn unescape_cfg(s: &str) -> String {
 pub struct SaveOpts {
     pub wake: u32,
     pub shot: u32,
+    pub pick: u32,
+    pub ocr: u32,
+    pub settings: u32,
     pub toast: bool,
     pub sound: bool,
     pub bilingual: bool,
+    pub toast_bg: u32,
+    pub toast_fg: u32,
+    pub toast_alpha: u32,
+    pub toast_secs: u32,
+    pub toast_pos: ToastPos,
+    pub ui_theme: UiTheme,
     pub provider: Provider,
     pub baidu_app_id: String,
     pub baidu_secret: String,
@@ -275,8 +523,25 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
     if opts.shot != VK_NONE && !is_allowed_vk(opts.shot) {
         return Err("不支持的截图按键".into());
     }
-    if opts.wake != VK_NONE && opts.shot != VK_NONE && opts.wake == opts.shot {
-        return Err("唤醒键与截图键不能相同".into());
+    if opts.pick != VK_NONE && !is_allowed_vk(opts.pick) {
+        return Err("不支持的框选按键".into());
+    }
+    if opts.ocr != VK_NONE && !is_allowed_vk(opts.ocr) {
+        return Err("不支持的识别按键".into());
+    }
+    if opts.settings != VK_NONE && !is_allowed_vk(opts.settings) {
+        return Err("不支持的设置窗口按键".into());
+    }
+    let keys = [opts.wake, opts.shot, opts.pick, opts.ocr, opts.settings];
+    for i in 0..keys.len() {
+        if keys[i] == VK_NONE {
+            continue;
+        }
+        for j in (i + 1)..keys.len() {
+            if keys[i] == keys[j] {
+                return Err("快捷键不能重复".into());
+            }
+        }
     }
     if opts.bilingual {
         let (k1, k2, name) = match opts.provider {
@@ -305,28 +570,46 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let body = format!(
-        "wake_vk={}\nshot_vk={}\ntoast={}\nsound={}\nbilingual={}\ntranslate_provider={}\nbaidu_app_id={}\nbaidu_secret={}\ntencent_secret_id={}\ntencent_secret_key={}\naliyun_access_key_id={}\naliyun_access_key_secret={}\n",
+    write_cfg_file(
+        &path,
         opts.wake,
         opts.shot,
-        if opts.toast { 1 } else { 0 },
-        if opts.sound { 1 } else { 0 },
-        if opts.bilingual { 1 } else { 0 },
-        opts.provider.cfg_name(),
-        escape_cfg(opts.baidu_app_id.trim()),
-        escape_cfg(opts.baidu_secret.trim()),
-        escape_cfg(opts.tencent_secret_id.trim()),
-        escape_cfg(opts.tencent_secret_key.trim()),
-        escape_cfg(opts.aliyun_access_key_id.trim()),
-        escape_cfg(opts.aliyun_access_key_secret.trim()),
-    );
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+        opts.pick,
+        opts.ocr,
+        opts.settings,
+        opts.toast,
+        opts.sound,
+        opts.bilingual,
+        opts.toast_bg,
+        opts.toast_fg,
+        opts.toast_alpha,
+        opts.toast_secs,
+        opts.toast_pos,
+        opts.ui_theme,
+        opts.provider,
+        opts.baidu_app_id.trim(),
+        opts.baidu_secret.trim(),
+        opts.tencent_secret_id.trim(),
+        opts.tencent_secret_key.trim(),
+        opts.aliyun_access_key_id.trim(),
+        opts.aliyun_access_key_secret.trim(),
+        chat_rect(),
+    )?;
 
     WAKE_VK.store(opts.wake, Ordering::SeqCst);
     SHOT_VK.store(opts.shot, Ordering::SeqCst);
+    PICK_VK.store(opts.pick, Ordering::SeqCst);
+    OCR_VK.store(opts.ocr, Ordering::SeqCst);
+    SETTINGS_VK.store(opts.settings, Ordering::SeqCst);
     TOAST_ENABLED.store(opts.toast, Ordering::SeqCst);
     SOUND_ENABLED.store(opts.sound, Ordering::SeqCst);
     BILINGUAL_ENABLED.store(opts.bilingual, Ordering::SeqCst);
+    TOAST_BG.store(opts.toast_bg & 0x00FF_FFFF, Ordering::SeqCst);
+    TOAST_FG.store(opts.toast_fg & 0x00FF_FFFF, Ordering::SeqCst);
+    TOAST_ALPHA.store(opts.toast_alpha.min(255), Ordering::SeqCst);
+    TOAST_SECS.store(clamp_toast_secs(opts.toast_secs), Ordering::SeqCst);
+    TOAST_POS.store(opts.toast_pos.as_u32(), Ordering::SeqCst);
+    UI_THEME.store(opts.ui_theme.as_u32(), Ordering::SeqCst);
     TRANSLATE_PROVIDER.store(opts.provider.as_u32(), Ordering::SeqCst);
     set_mutex(&BAIDU_APP_ID, opts.baidu_app_id.trim().to_string());
     set_mutex(&BAIDU_SECRET, opts.baidu_secret.trim().to_string());
@@ -335,6 +618,192 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
     set_mutex(&ALIYUN_AK_ID, opts.aliyun_access_key_id.trim().to_string());
     set_mutex(&ALIYUN_AK_SECRET, opts.aliyun_access_key_secret.trim().to_string());
     Ok(())
+}
+
+fn write_cfg_file(
+    path: &std::path::Path,
+    wake: u32,
+    shot: u32,
+    pick: u32,
+    ocr: u32,
+    settings: u32,
+    toast: bool,
+    sound: bool,
+    bilingual: bool,
+    toast_bg: u32,
+    toast_fg: u32,
+    toast_alpha: u32,
+    toast_secs: u32,
+    toast_pos: ToastPos,
+    ui_theme: UiTheme,
+    provider: Provider,
+    baidu_id: &str,
+    baidu_secret: &str,
+    tc_id: &str,
+    tc_key: &str,
+    ali_id: &str,
+    ali_secret: &str,
+    chat: ChatRect,
+) -> Result<(), String> {
+    let body = format!(
+        "wake_vk={}\nshot_vk={}\npick_vk={}\nocr_vk={}\nsettings_vk={}\ntoast={}\nsound={}\nbilingual={}\ntoast_bg={:06X}\ntoast_fg={:06X}\ntoast_alpha={}\ntoast_secs={}\ntoast_pos={}\nui_theme={}\ntranslate_provider={}\nbaidu_app_id={}\nbaidu_secret={}\ntencent_secret_id={}\ntencent_secret_key={}\naliyun_access_key_id={}\naliyun_access_key_secret={}\nchat_left={}\nchat_top={}\nchat_width={}\nchat_height={}\n",
+        wake,
+        shot,
+        pick,
+        ocr,
+        settings,
+        if toast { 1 } else { 0 },
+        if sound { 1 } else { 0 },
+        if bilingual { 1 } else { 0 },
+        toast_bg & 0x00FF_FFFF,
+        toast_fg & 0x00FF_FFFF,
+        toast_alpha.min(255),
+        clamp_toast_secs(toast_secs),
+        toast_pos.cfg_name(),
+        ui_theme.cfg_name(),
+        provider.cfg_name(),
+        escape_cfg(baidu_id),
+        escape_cfg(baidu_secret),
+        escape_cfg(tc_id),
+        escape_cfg(tc_key),
+        escape_cfg(ali_id),
+        escape_cfg(ali_secret),
+        chat.left,
+        chat.top,
+        chat.width,
+        chat.height,
+    );
+    std::fs::write(path, body).map_err(|e| e.to_string())
+}
+
+pub fn chat_rect() -> ChatRect {
+    CHAT_RECT.lock().map(|g| *g).unwrap_or_default()
+}
+
+/// 更新并持久化聊天框选区域（保留其它配置项）。
+pub fn set_chat_rect(rect: ChatRect) -> Result<(), String> {
+    if let Ok(mut g) = CHAT_RECT.lock() {
+        *g = rect;
+    }
+    let path = config_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let (baidu_id, baidu_secret) = baidu_credentials();
+    let (tc_id, tc_key) = tencent_credentials();
+    let (ali_id, ali_secret) = aliyun_credentials();
+    write_cfg_file(
+        &path,
+        WAKE_VK.load(Ordering::SeqCst),
+        SHOT_VK.load(Ordering::SeqCst),
+        PICK_VK.load(Ordering::SeqCst),
+        OCR_VK.load(Ordering::SeqCst),
+        SETTINGS_VK.load(Ordering::SeqCst),
+        TOAST_ENABLED.load(Ordering::SeqCst),
+        SOUND_ENABLED.load(Ordering::SeqCst),
+        BILINGUAL_ENABLED.load(Ordering::SeqCst),
+        TOAST_BG.load(Ordering::SeqCst),
+        TOAST_FG.load(Ordering::SeqCst),
+        TOAST_ALPHA.load(Ordering::SeqCst),
+        TOAST_SECS.load(Ordering::SeqCst),
+        toast_pos(),
+        ui_theme(),
+        translate_provider(),
+        &baidu_id,
+        &baidu_secret,
+        &tc_id,
+        &tc_key,
+        &ali_id,
+        &ali_secret,
+        rect,
+    )
+}
+
+/// 提示背景 RRGGBB
+pub fn toast_bg_rgb() -> u32 {
+    TOAST_BG.load(Ordering::SeqCst) & 0x00FF_FFFF
+}
+
+/// Windows COLORREF（0x00BBGGRR）
+pub fn toast_bg_colorref() -> u32 {
+    rgb_to_colorref(toast_bg_rgb())
+}
+
+pub fn toast_fg_rgb() -> u32 {
+    TOAST_FG.load(Ordering::SeqCst) & 0x00FF_FFFF
+}
+
+pub fn toast_fg_colorref() -> u32 {
+    rgb_to_colorref(toast_fg_rgb())
+}
+
+fn rgb_to_colorref(rgb: u32) -> u32 {
+    let r = rgb >> 16;
+    let g = (rgb >> 8) & 0xFF;
+    let b = rgb & 0xFF;
+    b << 16 | g << 8 | r
+}
+
+pub fn toast_alpha() -> u8 {
+    TOAST_ALPHA.load(Ordering::SeqCst).min(255) as u8
+}
+
+/// 翻译/OCR 提示显示秒数（1–120）
+pub fn toast_secs() -> u32 {
+    clamp_toast_secs(TOAST_SECS.load(Ordering::SeqCst))
+}
+
+pub fn toast_duration_ms() -> u32 {
+    toast_secs().saturating_mul(1000)
+}
+
+pub fn toast_pos() -> ToastPos {
+    ToastPos::from_u32(TOAST_POS.load(Ordering::SeqCst))
+}
+
+pub fn ui_theme() -> UiTheme {
+    UiTheme::from_u32(UI_THEME.load(Ordering::SeqCst))
+}
+
+/// 切换并持久化设置窗口主题。
+pub fn set_ui_theme(theme: UiTheme) -> Result<(), String> {
+    UI_THEME.store(theme.as_u32(), Ordering::SeqCst);
+    let path = config_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let (baidu_id, baidu_secret) = baidu_credentials();
+    let (tc_id, tc_key) = tencent_credentials();
+    let (ali_id, ali_secret) = aliyun_credentials();
+    write_cfg_file(
+        &path,
+        WAKE_VK.load(Ordering::SeqCst),
+        SHOT_VK.load(Ordering::SeqCst),
+        PICK_VK.load(Ordering::SeqCst),
+        OCR_VK.load(Ordering::SeqCst),
+        SETTINGS_VK.load(Ordering::SeqCst),
+        TOAST_ENABLED.load(Ordering::SeqCst),
+        SOUND_ENABLED.load(Ordering::SeqCst),
+        BILINGUAL_ENABLED.load(Ordering::SeqCst),
+        TOAST_BG.load(Ordering::SeqCst),
+        TOAST_FG.load(Ordering::SeqCst),
+        TOAST_ALPHA.load(Ordering::SeqCst),
+        TOAST_SECS.load(Ordering::SeqCst),
+        toast_pos(),
+        theme,
+        translate_provider(),
+        &baidu_id,
+        &baidu_secret,
+        &tc_id,
+        &tc_key,
+        &ali_id,
+        &ali_secret,
+        chat_rect(),
+    )
+}
+
+fn clamp_toast_secs(n: u32) -> u32 {
+    n.clamp(1, 120)
 }
 
 pub fn bilingual_enabled() -> bool {
@@ -390,7 +859,7 @@ pub fn test_out_path() -> PathBuf {
 pub fn is_allowed_vk(vk: u32) -> bool {
     matches!(
         vk,
-        0x08 | 0x09 | 0x0D | 0x20 | 0x2E |
+        0x08 | 0x09 | 0x0D | 0x20 | 0x23 | 0x24 | 0x2E |
         0x30..=0x39 | 0x41..=0x5A | 0x60..=0x69 |
         0x70..=0x7B | 0x90 | 0x91
     ) || (0xBA..=0xC0).contains(&vk)
@@ -406,6 +875,8 @@ pub fn vk_name(vk: u32) -> String {
         0x09 => "Tab".into(),
         0x0D => "Enter".into(),
         0x20 => "Space".into(),
+        0x23 => "End".into(),
+        0x24 => "Home".into(),
         0x2E => "Delete".into(),
         0x70 => "F1".into(),
         0x71 => "F2".into(),

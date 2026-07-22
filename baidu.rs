@@ -60,6 +60,21 @@ fn explain_error(code: &str, msg: &str) -> String {
 
 /// 将中文（或混合）文本翻译成英文。空输入返回空串。
 pub fn translate_zh_to_en(text: &str, app_id: &str, secret: &str) -> Result<String, String> {
+    translate(text, "zh", "en", app_id, secret)
+}
+
+/// 英文 → 中文
+pub fn translate_en_to_zh(text: &str, app_id: &str, secret: &str) -> Result<String, String> {
+    translate(text, "en", "zh", app_id, secret)
+}
+
+fn translate(
+    text: &str,
+    from: &str,
+    to: &str,
+    app_id: &str,
+    secret: &str,
+) -> Result<String, String> {
     let q = text.trim();
     if q.is_empty() {
         return Ok(String::new());
@@ -75,19 +90,17 @@ pub fn translate_zh_to_en(text: &str, app_id: &str, secret: &str) -> Result<Stri
         .map(|d| d.as_millis().to_string())
         .unwrap_or_else(|_| "1435660288".into());
 
-    // 签名：MD5(appid + q + salt + 密钥)，q 不做 URL 编码
     let sign_src = format!("{app_id}{q}{salt}{secret}");
     let sign = format!("{:x}", md5::compute(sign_src.as_bytes()));
 
-    // POST form，避免 GET 双重编码问题
     let resp = ureq::post(API_URL)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("User-Agent", "SC-Tool")
         .timeout(std::time::Duration::from_secs(10))
         .send_form(&[
             ("q", q),
-            ("from", "zh"),
-            ("to", "en"),
+            ("from", from),
+            ("to", to),
             ("appid", app_id),
             ("salt", &salt),
             ("sign", &sign),
@@ -116,13 +129,13 @@ pub fn translate_zh_to_en(text: &str, app_id: &str, secret: &str) -> Result<Stri
         .into_iter()
         .map(|r| r.dst)
         .collect::<Vec<_>>()
-        .join(" ");
+        .join("\n");
 
-    let en = joined.trim().to_string();
-    if en.is_empty() {
+    let out = joined.trim().to_string();
+    if out.is_empty() {
         Err("翻译结果为空".into())
     } else {
-        Ok(en)
+        Ok(out)
     }
 }
 

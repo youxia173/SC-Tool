@@ -15,6 +15,24 @@ pub fn translate_zh_to_en(
     access_key_id: &str,
     access_key_secret: &str,
 ) -> Result<String, String> {
+    translate(text, "zh", "en", access_key_id, access_key_secret)
+}
+
+pub fn translate_en_to_zh(
+    text: &str,
+    access_key_id: &str,
+    access_key_secret: &str,
+) -> Result<String, String> {
+    translate(text, "en", "zh", access_key_id, access_key_secret)
+}
+
+fn translate(
+    text: &str,
+    source_lang: &str,
+    target_lang: &str,
+    access_key_id: &str,
+    access_key_secret: &str,
+) -> Result<String, String> {
     let q = text.trim();
     if q.is_empty() {
         return Ok(String::new());
@@ -44,9 +62,9 @@ pub fn translate_zh_to_en(
     params.insert("SignatureMethod", "HMAC-SHA1".into());
     params.insert("SignatureNonce", nonce);
     params.insert("SignatureVersion", "1.0".into());
-    params.insert("SourceLanguage", "zh".into());
+    params.insert("SourceLanguage", source_lang.into());
     params.insert("SourceText", q.to_string());
-    params.insert("TargetLanguage", "en".into());
+    params.insert("TargetLanguage", target_lang.into());
     params.insert("Timestamp", timestamp);
     params.insert("Version", "2018-10-12".into());
 

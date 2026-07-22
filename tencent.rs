@@ -36,6 +36,20 @@ struct ApiError {
 }
 
 pub fn translate_zh_to_en(text: &str, secret_id: &str, secret_key: &str) -> Result<String, String> {
+    translate(text, "zh", "en", secret_id, secret_key)
+}
+
+pub fn translate_en_to_zh(text: &str, secret_id: &str, secret_key: &str) -> Result<String, String> {
+    translate(text, "en", "zh", secret_id, secret_key)
+}
+
+fn translate(
+    text: &str,
+    source: &str,
+    target: &str,
+    secret_id: &str,
+    secret_key: &str,
+) -> Result<String, String> {
     let q = text.trim();
     if q.is_empty() {
         return Ok(String::new());
@@ -54,8 +68,8 @@ pub fn translate_zh_to_en(text: &str, secret_id: &str, secret_key: &str) -> Resu
 
     let payload = serde_json::json!({
         "SourceText": q,
-        "Source": "zh",
-        "Target": "en",
+        "Source": source,
+        "Target": target,
         "ProjectId": 0
     })
     .to_string();
@@ -109,7 +123,7 @@ pub fn translate_zh_to_en(text: &str, secret_id: &str, secret_key: &str) -> Resu
         if let Some(err) = r.error {
             let code = err.code.unwrap_or_default();
             let msg = err.message.unwrap_or_default();
-            return Err(format!("腾讯云错误: {msg} ({code})"));
+            return Err(format_api_error(&code, &msg));
         }
         if let Some(t) = r.target_text {
             let t = t.trim().to_string();
@@ -120,6 +134,26 @@ pub fn translate_zh_to_en(text: &str, secret_id: &str, secret_key: &str) -> Resu
         }
     }
     Err(format!("腾讯云返回异常: {}", truncate(&body, 160)))
+}
+
+/// 将常见英文 API 报错转成中文提示
+fn format_api_error(code: &str, msg: &str) -> String {
+    let code_l = code.to_ascii_lowercase();
+    let msg_l = msg.to_ascii_lowercase();
+    if code_l.contains("requestlimitexceeded")
+        || msg_l.contains("requestlimitexceeded")
+        || msg_l.contains("frequency limit")
+        || msg_l.contains("exceeds the frequency")
+    {
+        return "翻译请求过于频繁，超过腾讯云每秒调用次数限制，请稍后再试".into();
+    }
+    if code.is_empty() {
+        format!("腾讯云错误: {msg}")
+    } else if msg.is_empty() {
+        format!("腾讯云错误: {code}")
+    } else {
+        format!("腾讯云错误: {msg} ({code})")
+    }
 }
 
 fn utc_date(ts: u64) -> String {

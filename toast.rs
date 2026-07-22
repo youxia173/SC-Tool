@@ -1,6 +1,7 @@
-//! 游戏内右上角文字提示（不抢焦点、可点击穿透）
+//! 游戏内文字提示（不抢焦点、可点击穿透）
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::Mutex;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -8,17 +9,95 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::config;
+
 const CLASS: &str = "ScToolToast";
 const TIMER_HIDE: usize = 1;
-const TOAST_W: i32 = 280;
-const TOAST_H: i32 = 56;
-const SHOW_MS: u32 = 2000;
+const DEFAULT_W: i32 = 280;
+const DEFAULT_H: i32 = 56;
+const SHOW_MS_SHORT: u32 = 2000;
+const MAX_TOAST_W: i32 = 720;
+const MIN_TOAST_W: i32 = 320;
+const MAX_TOAST_H: i32 = 480;
+const MIN_TOAST_H: i32 = 56;
 
 static TOAST_HWND: AtomicIsize = AtomicIsize::new(0);
 static TOAST_OK: AtomicBool = AtomicBool::new(true);
+static TOAST_W: AtomicI32 = AtomicI32::new(DEFAULT_W);
+static TOAST_H: AtomicI32 = AtomicI32::new(DEFAULT_H);
+static TOAST_TEXT: Mutex<String> = Mutex::new(String::new());
 
+/// 锚到窗口所在显示器右上角（截图成功等）。
 pub unsafe fn show(anchor: HWND, text: &str, ok: bool) {
+    show_inner(text, ok, SHOW_MS_SHORT, None, DEFAULT_W, DEFAULT_H);
+    let hwnd = HWND(TOAST_HWND.load(Ordering::SeqCst) as *mut _);
+    if !hwnd.0.is_null() {
+        position_top_right(hwnd, anchor);
+        reveal(hwnd);
+    }
+}
+
+/// 显示在框选聊天区附近（OCR 结果等；位置由设置决定）。
+pub unsafe fn show_above_chat_rect(text: &str, ok: bool) {
+    let rect = crate::config::chat_rect();
+    let pos_mode = config::toast_pos();
+    let (mut w, mut h) = measure_toast_size(text);
+    let pos = if rect.is_set() {
+        match pos_mode {
+            config::ToastPos::Right => {
+                // 右侧：用自然宽度，高度按内容
+                w = w.clamp(MIN_TOAST_W, MAX_TOAST_W);
+                h = measure_toast_height(text, w);
+                let x = rect.left + rect.width + 10;
+                let y = rect.top.max(0);
+                Some((x, y))
+            }
+            config::ToastPos::Below => {
+                w = w.max(rect.width.min(MAX_TOAST_W)).clamp(MIN_TOAST_W, MAX_TOAST_W);
+                h = measure_toast_height(text, w);
+                let x = rect.left + (rect.width - w) / 2;
+                let y = rect.top + rect.height + 10;
+                Some((x, y))
+            }
+            config::ToastPos::Above => {
+                w = w.max(rect.width.min(MAX_TOAST_W)).clamp(MIN_TOAST_W, MAX_TOAST_W);
+                h = measure_toast_height(text, w);
+                let x = rect.left + (rect.width - w) / 2;
+                let mut y = rect.top - h - 10;
+                if y < 0 {
+                    y = rect.top.max(0);
+                }
+                Some((x, y))
+            }
+        }
+    } else {
+        None
+    };
+    show_inner(text, ok, config::toast_duration_ms(), pos, w, h);
+    let hwnd = HWND(TOAST_HWND.load(Ordering::SeqCst) as *mut _);
+    if !hwnd.0.is_null() {
+        if pos.is_none() {
+            position_top_right(hwnd, GetForegroundWindow());
+        }
+        reveal(hwnd);
+    }
+}
+
+unsafe fn show_inner(
+    text: &str,
+    ok: bool,
+    duration_ms: u32,
+    pos: Option<(i32, i32)>,
+    width: i32,
+    height: i32,
+) {
     TOAST_OK.store(ok, Ordering::SeqCst);
+    TOAST_W.store(width, Ordering::SeqCst);
+    TOAST_H.store(height, Ordering::SeqCst);
+    if let Ok(mut g) = TOAST_TEXT.lock() {
+        *g = text.to_string();
+    }
+
     let hwnd = ensure_window();
     if hwnd.0.is_null() {
         return;
@@ -27,8 +106,34 @@ pub unsafe fn show(anchor: HWND, text: &str, ok: bool) {
     let tw: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let _ = SetWindowTextW(hwnd, PCWSTR(tw.as_ptr()));
 
-    position_top_right(hwnd, anchor);
-    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 230, LWA_ALPHA);
+    if let Some((x, y)) = pos {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE,
+        );
+    } else {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOACTIVATE,
+        );
+    }
+
+    let _ = KillTimer(hwnd, TIMER_HIDE);
+    let _ = SetTimer(hwnd, TIMER_HIDE, duration_ms, None);
+}
+
+unsafe fn reveal(hwnd: HWND) {
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), config::toast_alpha(), LWA_ALPHA);
     let _ = SetWindowPos(
         hwnd,
         HWND_TOPMOST,
@@ -40,9 +145,23 @@ pub unsafe fn show(anchor: HWND, text: &str, ok: bool) {
     );
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     let _ = InvalidateRect(hwnd, None, true);
+}
 
-    let _ = KillTimer(hwnd, TIMER_HIDE);
-    let _ = SetTimer(hwnd, TIMER_HIDE, SHOW_MS, None);
+fn measure_toast_size(text: &str) -> (i32, i32) {
+    let chars = text.chars().count() as i32;
+    let w = (MIN_TOAST_W + chars).clamp(MIN_TOAST_W, MAX_TOAST_W);
+    let h = measure_toast_height(text, w);
+    (w, h)
+}
+
+fn measure_toast_height(text: &str, width: i32) -> i32 {
+    let chars = text.chars().count() as i32;
+    let hard_lines = text.lines().count().max(1) as i32;
+    // 约每行可放 width/9 个字符（YaHei 18px 粗估）
+    let per_line = ((width - 20) / 9).max(16);
+    let wrap_lines = (chars + per_line - 1) / per_line;
+    let lines = hard_lines.max(wrap_lines).max(1);
+    (24 + lines * 20).clamp(MIN_TOAST_H, MAX_TOAST_H)
 }
 
 unsafe fn ensure_window() -> HWND {
@@ -69,8 +188,8 @@ unsafe fn ensure_window() -> HWND {
         WS_POPUP,
         0,
         0,
-        TOAST_W,
-        TOAST_H,
+        DEFAULT_W,
+        DEFAULT_H,
         None,
         None,
         HINSTANCE(hinst.0),
@@ -94,17 +213,11 @@ unsafe fn position_top_right(toast: HWND, anchor: HWND) {
     if !GetMonitorInfoW(mon, &mut mi).as_bool() {
         return;
     }
-    let x = mi.rcMonitor.right - TOAST_W - 24;
+    let tw = TOAST_W.load(Ordering::SeqCst);
+    let th = TOAST_H.load(Ordering::SeqCst);
+    let x = mi.rcMonitor.right - tw - 24;
     let y = mi.rcMonitor.top + 24;
-    let _ = SetWindowPos(
-        toast,
-        HWND_TOPMOST,
-        x,
-        y,
-        TOAST_W,
-        TOAST_H,
-        SWP_NOACTIVATE,
-    );
+    let _ = SetWindowPos(toast, HWND_TOPMOST, x, y, tw, th, SWP_NOACTIVATE);
 }
 
 unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -120,9 +233,8 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
             let ok = TOAST_OK.load(Ordering::SeqCst);
-            // 成功：深绿底；失败：深红底
             let bg = if ok {
-                COLORREF(0x002E6B2E)
+                COLORREF(config::toast_bg_colorref())
             } else {
                 COLORREF(0x002E2E8B)
             };
@@ -133,10 +245,10 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             let _ = DeleteObject(brush);
 
             let _ = SetBkMode(hdc, TRANSPARENT);
-            let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+            let _ = SetTextColor(hdc, COLORREF(config::toast_fg_colorref()));
 
             let font = CreateFontW(
-                22,
+                18,
                 0,
                 0,
                 0,
@@ -153,14 +265,23 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             );
             let old = SelectObject(hdc, font);
 
-            let mut text = [0u16; 128];
-            let n = GetWindowTextW(hwnd, &mut text);
-            if n > 0 {
+            let text = TOAST_TEXT
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let mut buf: Vec<u16> = text.encode_utf16().collect();
+            if !buf.is_empty() {
+                let mut text_rc = RECT {
+                    left: rc.left + 10,
+                    top: rc.top + 8,
+                    right: rc.right - 10,
+                    bottom: rc.bottom - 8,
+                };
                 let _ = DrawTextW(
                     hdc,
-                    &mut text[..n as usize],
-                    &mut rc,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    &mut buf,
+                    &mut text_rc,
+                    DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX,
                 );
             }
 

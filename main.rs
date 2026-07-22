@@ -19,6 +19,9 @@ mod baidu;
 mod tencent;
 mod aliyun;
 mod translate;
+mod region;
+mod ocr;
+mod chatfmt;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -35,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 显示名称（托盘 / 菜单 / 窗口标题）
-const APP_TITLE: &str = "SC 小工具v1.2.0";
+const APP_TITLE: &str = "SC 小工具v1.3.0";
 
 // ============ 你唯一需要改的地方 ============
 
@@ -81,6 +84,7 @@ fn ascii_pass(c: char) -> bool {
 /// 中文 -> `[zh]` 转译串。忠实复刻 ime01 的编码：
 ///   表中汉字 -> `@`+码（首个汉字前是 ` @`）；ASCII 原样（跟在汉字后补一个空格）；
 ///   既不在表中、又非 ASCII 的字符直接丢弃。
+///   若以汉字码结尾，末尾再补一个空格，避免后面紧跟换行/`[en]` 时末字解析不完整。
 fn translate(input: &str) -> String {
     let tbl = xc_table();
     let mut s = String::from("[zh]");
@@ -102,6 +106,9 @@ fn translate(input: &str) -> String {
             prev_cn = false;
         }
     }
+    if prev_cn {
+        s.push(' ');
+    }
     s
 }
 
@@ -110,9 +117,9 @@ mod tests {
     use super::translate;
     #[test]
     fn known_samples() {
-        assert_eq!(translate("你好"), "[zh] @ih@e8");
-        assert_eq!(translate("你好啊"), "[zh] @ih@e8@064");
-        assert_eq!(translate("座"), "[zh] @08d");
+        assert_eq!(translate("你好"), "[zh] @ih@e8 ");
+        assert_eq!(translate("你好啊"), "[zh] @ih@e8@064 ");
+        assert_eq!(translate("座"), "[zh] @08d ");
     }
 }
 
@@ -122,6 +129,9 @@ const GAME_EXES: &[&str] = &["starcitizen.exe"];
 // 托盘：自定义回调消息 + 菜单项
 const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_SCREENSHOT: u32 = WM_APP + 2;
+const WM_PICK_CHAT: u32 = WM_APP + 3;
+const WM_OCR_CHAT: u32 = WM_APP + 4;
+const WM_TOGGLE_SETTINGS: u32 = WM_APP + 5;
 const TRAY_UID: u32 = 1;
 const IDM_EXIT: u32 = 1001;
 const IDM_SETTINGS: u32 = 1002;
@@ -132,7 +142,9 @@ static EDIT_HWND: AtomicIsize = AtomicIsize::new(0);
 static GAME_HWND: AtomicIsize = AtomicIsize::new(0);
 static SENDING: AtomicBool = AtomicBool::new(false);
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+static PICKING: AtomicBool = AtomicBool::new(false);
 static LAST_SHOT_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LAST_OCR_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static KB_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 #[inline]
@@ -233,9 +245,26 @@ unsafe extern "system" fn low_level_kb_proc(
             let injected = (kb.flags.0 & 0x10) != 0; // LLKHF_INJECTED
             let wake_vk = config::WAKE_VK.load(Ordering::SeqCst);
             let shot_vk = config::SHOT_VK.load(Ordering::SeqCst);
+            let pick_vk = config::PICK_VK.load(Ordering::SeqCst);
+            let ocr_vk = config::OCR_VK.load(Ordering::SeqCst);
+            let settings_vk = config::SETTINGS_VK.load(Ordering::SeqCst);
 
             if pressed && !injected {
                 settings::on_global_key(kb.vkCode);
+            }
+
+            // —— 设置窗口开关 ——
+            if settings_vk != 0
+                && kb.vkCode == settings_vk
+                && pressed
+                && !injected
+                && !settings::is_capturing_key()
+            {
+                let main = load(&MAIN_HWND);
+                if !is_null(main) {
+                    let _ = PostMessageW(main, WM_TOGGLE_SETTINGS, WPARAM(0), LPARAM(0));
+                }
+                return LRESULT(1);
             }
 
             // —— 唤醒输入框 ——
@@ -281,6 +310,40 @@ unsafe extern "system" fn low_level_kb_proc(
                             store(&GAME_HWND, fg);
                         }
                         let _ = PostMessageW(main, WM_SCREENSHOT, WPARAM(0), LPARAM(0));
+                    }
+                }
+                return LRESULT(1);
+            }
+
+            // —— 框选聊天区 ——
+            if pick_vk != 0
+                && kb.vkCode == pick_vk
+                && pressed
+                && !injected
+                && !PICKING.load(Ordering::SeqCst)
+                && !settings::is_open()
+            {
+                let main = load(&MAIN_HWND);
+                if !is_null(main) {
+                    let _ = PostMessageW(main, WM_PICK_CHAT, WPARAM(0), LPARAM(0));
+                }
+                return LRESULT(1);
+            }
+
+            // —— 识别聊天区 ——
+            if ocr_vk != 0
+                && kb.vkCode == ocr_vk
+                && pressed
+                && !injected
+                && !PICKING.load(Ordering::SeqCst)
+            {
+                let main = load(&MAIN_HWND);
+                if !is_null(main) {
+                    let now = GetTickCount();
+                    let prev = LAST_OCR_TICK.load(Ordering::SeqCst);
+                    if now.wrapping_sub(prev) >= 600 {
+                        LAST_OCR_TICK.store(now, Ordering::SeqCst);
+                        let _ = PostMessageW(main, WM_OCR_CHAT, WPARAM(0), LPARAM(0));
                     }
                 }
                 return LRESULT(1);
@@ -472,6 +535,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
 
+        x if x == WM_PICK_CHAT => {
+            do_pick_chat_region(hwnd);
+            LRESULT(0)
+        }
+
+        x if x == WM_OCR_CHAT => {
+            do_ocr_chat_region(hwnd);
+            LRESULT(0)
+        }
+
+        x if x == WM_TOGGLE_SETTINGS => {
+            settings::toggle(hwnd);
+            LRESULT(0)
+        }
+
         WM_COMMAND => {
             let id = (wp.0 as u32) & 0xFFFF;
             if id == IDM_SETTINGS {
@@ -566,6 +644,49 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     );
     let _ = DestroyMenu(menu);
     let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+}
+
+unsafe fn do_pick_chat_region(_owner: HWND) {
+    if PICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(rect) = region::pick_chat_region() {
+        match config::set_chat_rect(rect) {
+            Ok(()) => {
+                toast::show_above_chat_rect(
+                    &format!("聊天区已保存 · {}×{}", rect.width, rect.height),
+                    true,
+                );
+            }
+            Err(e) => {
+                toast::show_above_chat_rect(&format!("保存失败: {e}"), false);
+            }
+        }
+    }
+    PICKING.store(false, Ordering::SeqCst);
+}
+
+unsafe fn do_ocr_chat_region(_owner: HWND) {
+    match ocr::recognize_chat_region() {
+        Ok(en) => match translate::en_to_zh_chat(&en) {
+            Ok((en_fmt, zh)) => {
+                let clip = format!("{en_fmt}\n\n{zh}");
+                let _ = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &clip);
+                toast::show_above_chat_rect(&format!("{zh}\n（已复制原文+译文）"), true);
+            }
+            Err(e) => {
+                let en_fmt = chatfmt::format_player_chat(&en);
+                let _ = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &en_fmt);
+                toast::show_above_chat_rect(
+                    &format!("{en_fmt}\n（翻译失败: {e}，已复制英文）"),
+                    false,
+                );
+            }
+        },
+        Err(e) => {
+            toast::show_above_chat_rect(&e, false);
+        }
+    }
 }
 
 unsafe fn notify_tray(hwnd: HWND, title: &str, body: &str, with_sound: bool) {

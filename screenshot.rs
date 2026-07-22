@@ -15,6 +15,67 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::{CF_BITMAP, CF_DIB};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+/// 截取屏幕绝对坐标矩形（BGRA top-down）。
+pub unsafe fn capture_screen_rect(x: i32, y: i32, width: i32, height: i32) -> Result<(Vec<u8>, u32, u32)> {
+    if width <= 0 || height <= 0 {
+        return Err(Error::from(E_FAIL));
+    }
+    let hdc_screen = GetDC(None);
+    if hdc_screen.is_invalid() {
+        return Err(Error::from(E_FAIL));
+    }
+    let hdc_mem = CreateCompatibleDC(hdc_screen);
+    if hdc_mem.is_invalid() {
+        let _ = ReleaseDC(None, hdc_screen);
+        return Err(Error::from(E_FAIL));
+    }
+    let hbmp = CreateCompatibleBitmap(hdc_screen, width, height);
+    if hbmp.is_invalid() {
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+        return Err(Error::from(E_FAIL));
+    }
+    let old = SelectObject(hdc_mem, hbmp);
+    let ok = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, x, y, SRCCOPY).is_ok();
+    let _ = SelectObject(hdc_mem, old);
+    if !ok {
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+        return Err(Error::from(E_FAIL));
+    }
+
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0 as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut buf = vec![0u8; (width * height * 4) as usize];
+    let got = GetDIBits(
+        hdc_mem,
+        hbmp,
+        0,
+        height as u32,
+        Some(buf.as_mut_ptr() as *mut _),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    let _ = DeleteObject(hbmp);
+    let _ = DeleteDC(hdc_mem);
+    let _ = ReleaseDC(None, hdc_screen);
+    if got == 0 {
+        return Err(Error::from(E_FAIL));
+    }
+    Ok((buf, width as u32, height as u32))
+}
+
 pub unsafe fn capture_window_monitor(hwnd: HWND, clipboard_owner: HWND) -> Result<()> {
     let target = if hwnd.0.is_null() {
         GetForegroundWindow()
