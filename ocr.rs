@@ -1,4 +1,4 @@
-//! 聊天区截图 + Windows.Media.Ocr（本地免费）。
+//! 聊天区截图 + OCR（系统本地 / 百度云高精度）。
 
 use std::sync::Once;
 
@@ -12,7 +12,8 @@ use windows::Win32::System::WinRT::{
     IMemoryBufferByteAccess, RoInitialize, RO_INIT_MULTITHREADED,
 };
 
-use crate::config;
+use crate::baidu_ocr;
+use crate::config::{self, OcrProvider};
 use crate::screenshot;
 
 static WINRT_INIT: Once = Once::new();
@@ -27,7 +28,6 @@ fn ensure_winrt() {
 
 /// 对已保存聊天区做 OCR，返回识别文本。
 pub fn recognize_chat_region() -> std::result::Result<String, String> {
-    ensure_winrt();
     let rect = config::chat_rect();
     if !rect.is_set() {
         return Err("尚未框选聊天区，请先在托盘或设置中框选".into());
@@ -38,8 +38,17 @@ pub fn recognize_chat_region() -> std::result::Result<String, String> {
             .map_err(|e| format!("截取聊天区失败: {e}"))?
     };
 
-    let (rgba, ow, oh) = upscale2x_bgra_to_rgba(&bgra, w, h);
-    ocr_rgba(&rgba, ow, oh)
+    match config::ocr_provider() {
+        OcrProvider::System => {
+            ensure_winrt();
+            let (rgba, ow, oh) = upscale2x_bgra_to_rgba(&bgra, w, h);
+            ocr_rgba(&rgba, ow, oh)
+        }
+        OcrProvider::Baidu => {
+            let (ak, sk) = config::baidu_ocr_credentials();
+            baidu_ocr::recognize_bgra(&bgra, w, h, &ak, &sk)
+        }
+    }
 }
 
 fn upscale2x_bgra_to_rgba(bgra: &[u8], w: u32, h: u32) -> (Vec<u8>, i32, i32) {

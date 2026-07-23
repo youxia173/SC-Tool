@@ -23,15 +23,15 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::{
-    self, vk_name, Provider, ToastPos, UiTheme, BILINGUAL_ENABLED, OCR_VK, PICK_VK, SETTINGS_VK,
-    SHOT_VK, SOUND_ENABLED, TOAST_ALPHA, TOAST_BG, TOAST_ENABLED, TOAST_FG, TOAST_POS, TOAST_SECS,
-    VK_NONE, WAKE_VK, DEFAULT_TOAST_ALPHA, DEFAULT_TOAST_BG, DEFAULT_TOAST_FG,
+    self, vk_name, OcrProvider, Provider, ToastPos, UiTheme, BILINGUAL_ENABLED, OCR_VK, PICK_VK,
+    SETTINGS_VK, SHOT_VK, SOUND_ENABLED, TOAST_ALPHA, TOAST_BG, TOAST_ENABLED, TOAST_FG, TOAST_POS,
+    TOAST_SECS, VK_NONE, WAKE_VK, DEFAULT_TOAST_ALPHA, DEFAULT_TOAST_BG, DEFAULT_TOAST_FG,
 };
 
 const CLASS: &str = "ScToolSettings";
 /// 客户区目标尺寸（不含标题栏）；外框用 AdjustWindowRectEx 换算
 const SETTINGS_CLIENT_W: i32 = 460;
-const SETTINGS_CLIENT_H: i32 = 740;
+const SETTINGS_CLIENT_H: i32 = 880;
 const SETTINGS_STYLE: WINDOW_STYLE =
     WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0);
 const IDC_WAKE_BTN: isize = 2001;
@@ -77,12 +77,24 @@ const IDC_TOAST_POS: isize = 2042;
 const IDC_THEME_TOGGLE: isize = 2043;
 const IDC_SETTINGS_BTN: isize = 2044;
 const IDC_SETTINGS_CLEAR: isize = 2045;
+const IDC_KEY1_SHOW: isize = 2046;
+const IDC_OCR_PROVIDER_LABEL: isize = 2048;
+const IDC_OCR_PROVIDER: isize = 2049;
+const IDC_OCR_KEY1_LABEL: isize = 2050;
+const IDC_OCR_KEY1: isize = 2051;
+const IDC_OCR_KEY2_LABEL: isize = 2052;
+const IDC_OCR_KEY2: isize = 2053;
+const IDC_OCR_KEYS_SHOW: isize = 2054;
+const IDC_OCR_HELP: isize = 2056;
+const IDC_OCR_HINT: isize = 2057;
 
 const SWATCH_CLASS: &str = "ScToolColorSwatch";
 const SLIDER_CLASS: &str = "ScToolAlphaSlider";
 const BS_OWNERDRAW: u32 = 0x000B;
 const CORNER_R: i32 = 12;
 const CORNER_R_SMALL: i32 = 8;
+/// EM_SETPASSWORDCHAR：0 明文，'*' 打码
+const EM_SETPASSWORDCHAR: u32 = 0x00CC;
 /// 滑条 → 父窗口：值变化通知（wParam = 0–255）
 const WM_SLIDER_CHANGED: u32 = WM_APP + 50;
 
@@ -179,6 +191,7 @@ static DRAFT_TOAST_BG: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_BG);
 static DRAFT_TOAST_FG: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_FG);
 static DRAFT_TOAST_ALPHA: AtomicU32 = AtomicU32::new(DEFAULT_TOAST_ALPHA);
 static DRAFT_PROVIDER: AtomicU32 = AtomicU32::new(0);
+static DRAFT_OCR_PROVIDER: AtomicU32 = AtomicU32::new(0);
 static UI_FONT: AtomicIsize = AtomicIsize::new(0);
 static THEME_BG_BRUSH: AtomicIsize = AtomicIsize::new(0);
 static THEME_EDIT_BRUSH: AtomicIsize = AtomicIsize::new(0);
@@ -196,13 +209,20 @@ struct Creds {
     baidu: (String, String),
     tencent: (String, String),
     aliyun: (String, String),
+    /// DeepSeek Flash/Pro 共用一把 API Key（存于 .0；.1 不用）
+    deepseek: (String, String),
 }
 
 static CRED_DRAFT: Mutex<Creds> = Mutex::new(Creds {
     baidu: (String::new(), String::new()),
     tencent: (String::new(), String::new()),
     aliyun: (String::new(), String::new()),
+    deepseek: (String::new(), String::new()),
 });
+/// 密钥输入框是否明文显示
+static KEYS_REVEALED: AtomicBool = AtomicBool::new(false);
+static OCR_KEYS_REVEALED: AtomicBool = AtomicBool::new(false);
+static OCR_CRED_DRAFT: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
 
 pub fn is_open() -> bool {
     let h = SETTINGS_HWND.load(Ordering::SeqCst);
@@ -333,13 +353,20 @@ pub unsafe fn open(parent: HWND) {
     DRAFT_TOAST_FG.store(TOAST_FG.load(Ordering::SeqCst), Ordering::SeqCst);
     DRAFT_TOAST_ALPHA.store(TOAST_ALPHA.load(Ordering::SeqCst), Ordering::SeqCst);
     DRAFT_PROVIDER.store(config::translate_provider().as_u32(), Ordering::SeqCst);
+    DRAFT_OCR_PROVIDER.store(config::ocr_provider().as_u32(), Ordering::SeqCst);
     CAPTURE_MODE.store(0, Ordering::SeqCst);
     KONAMI_IDX.store(0, Ordering::SeqCst);
+    KEYS_REVEALED.store(false, Ordering::SeqCst);
+    OCR_KEYS_REVEALED.store(false, Ordering::SeqCst);
 
     if let Ok(mut g) = CRED_DRAFT.lock() {
         g.baidu = config::baidu_credentials();
         g.tencent = config::tencent_credentials();
         g.aliyun = config::aliyun_credentials();
+        g.deepseek = (config::deepseek_api_key(), String::new());
+    }
+    if let Ok(mut g) = OCR_CRED_DRAFT.lock() {
+        *g = config::baidu_ocr_credentials();
     }
 
     let hinst = GetModuleHandleW(None).unwrap_or_default();
@@ -402,6 +429,7 @@ pub unsafe fn open(parent: HWND) {
     refresh_buttons(hwnd);
     sync_checks(hwnd);
     refresh_provider_ui(hwnd);
+    refresh_ocr_provider_ui(hwnd);
     apply_settings_title(hwnd);
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
@@ -734,6 +762,40 @@ unsafe fn build_controls(hwnd: HWND, hinst: HINSTANCE) {
     create_btn(hwnd, hinst, 344, y, 64, 28, IDC_PICK_CLEAR, "清除");
     y += row + gap + 2;
 
+    create_static(hwnd, hinst, 36, y + 3, 64, 20, IDC_OCR_PROVIDER_LABEL, "OCR引擎");
+    create_ocr_combo(hwnd, hinst, 108, y - 2, 300, 120, IDC_OCR_PROVIDER);
+    y += 30;
+    let ocr_fields_y = y;
+    create_static(hwnd, hinst, 36, y + 3, 90, 20, IDC_OCR_KEY1_LABEL, "OCR API Key");
+    create_edit(hwnd, hinst, 130, y, 218, 24, IDC_OCR_KEY1, true);
+    create_btn(hwnd, hinst, 354, y, 26, 24, IDC_OCR_KEYS_SHOW, "显");
+    y += 28;
+    create_static(hwnd, hinst, 36, y + 3, 90, 20, IDC_OCR_KEY2_LABEL, "OCR Secret");
+    create_edit(hwnd, hinst, 130, y, 248, 24, IDC_OCR_KEY2, true);
+    y += 26;
+    create_link(
+        hwnd,
+        hinst,
+        36,
+        y,
+        400,
+        18,
+        IDC_OCR_HELP,
+        "打开「应用列表」获取 API Key / Secret Key",
+    );
+    y += 28;
+    // 系统 OCR 时占位说明（与密钥区同高度叠放，互斥显示）
+    create_static(
+        hwnd,
+        hinst,
+        36,
+        ocr_fields_y,
+        400,
+        70,
+        IDC_OCR_HINT,
+        "本地 Windows OCR：无需联网和密钥。\n识别效果差时，建议移动视角使背景颜色纯净、对比度高，以增加识别能力。",
+    );
+
     create_check(hwnd, hinst, 36, y, 380, 22, IDC_TOAST, "截图成功后显示右上角文字提示");
     y += 24;
     create_check(hwnd, hinst, 36, y, 380, 22, IDC_SOUND, "截图成功后播放提示音（默认关闭）");
@@ -839,11 +901,12 @@ unsafe fn build_controls(hwnd: HWND, hinst: HINSTANCE) {
     y += 32;
 
     create_static(hwnd, hinst, 36, y + 3, 90, 20, IDC_KEY1_LABEL, "APP ID");
-    create_edit(hwnd, hinst, 130, y, 250, 24, IDC_KEY1, false);
+    create_edit(hwnd, hinst, 130, y, 218, 24, IDC_KEY1, true);
+    create_btn(hwnd, hinst, 354, y, 26, 24, IDC_KEY1_SHOW, "显");
     y += 28;
 
     create_static(hwnd, hinst, 36, y + 3, 90, 20, IDC_KEY2_LABEL, "密钥");
-    create_edit(hwnd, hinst, 130, y, 250, 24, IDC_KEY2, true);
+    create_edit(hwnd, hinst, 130, y, 248, 24, IDC_KEY2, true);
     y += 30;
 
     create_static(hwnd, hinst, 36, y, 400, 40, IDC_HELP_HINT, "");
@@ -851,7 +914,7 @@ unsafe fn build_controls(hwnd: HWND, hinst: HINSTANCE) {
     create_link(hwnd, hinst, 36, y, 400, 18, IDC_HELP_LINK, "https://");
     y += 22;
     create_link(hwnd, hinst, 36, y, 400, 18, IDC_HELP_LINK2, "");
-    y += 32;
+    y += 44;
 
     create_btn(hwnd, hinst, 36, y, 100, 28, IDC_TEST_TRANS, "测试翻译");
     create_btn(hwnd, hinst, 148, y, 100, 28, IDC_SAVE, "保存");
@@ -874,11 +937,54 @@ unsafe fn create_combo(parent: HWND, hinst: HINSTANCE, x: i32, y: i32, w: i32, h
         None,
     ) {
         apply_font(ctrl);
-        for name in ["百度翻译", "腾讯云翻译", "阿里云翻译"] {
+        for name in [
+            "百度翻译（免费）",
+            "腾讯云翻译（免费）",
+            "阿里云翻译（免费）",
+            "DeepSeek Flash（付费）",
+            "DeepSeek Pro（付费）",
+        ] {
             let tw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let _ = SendMessageW(ctrl, CB_ADDSTRING, WPARAM(0), LPARAM(tw.as_ptr() as isize));
         }
         let sel = DRAFT_PROVIDER.load(Ordering::SeqCst) as usize;
+        let _ = SendMessageW(ctrl, CB_SETCURSEL, WPARAM(sel), LPARAM(0));
+    }
+}
+
+unsafe fn create_ocr_combo(
+    parent: HWND,
+    hinst: HINSTANCE,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    id: isize,
+) {
+    if let Ok(ctrl) = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("COMBOBOX"),
+        w!(""),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(CBS_DROPDOWNLIST) | WS_VSCROLL,
+        x,
+        y,
+        w,
+        h,
+        parent,
+        HMENU(id as *mut core::ffi::c_void),
+        hinst,
+        None,
+    ) {
+        apply_font(ctrl);
+        for p in [OcrProvider::System, OcrProvider::Baidu] {
+            let tw: Vec<u16> = p
+                .display_name()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = SendMessageW(ctrl, CB_ADDSTRING, WPARAM(0), LPARAM(tw.as_ptr() as isize));
+        }
+        let sel = DRAFT_OCR_PROVIDER.load(Ordering::SeqCst) as usize;
         let _ = SendMessageW(ctrl, CB_SETCURSEL, WPARAM(sel), LPARAM(0));
     }
 }
@@ -1122,6 +1228,38 @@ unsafe fn current_provider(hwnd: HWND) -> Provider {
     }
 }
 
+unsafe fn current_ocr_provider(hwnd: HWND) -> OcrProvider {
+    let Ok(combo) = GetDlgItem(hwnd, IDC_OCR_PROVIDER as i32) else {
+        return OcrProvider::from_u32(DRAFT_OCR_PROVIDER.load(Ordering::SeqCst));
+    };
+    let sel = SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    if sel < 0 {
+        OcrProvider::System
+    } else {
+        OcrProvider::from_u32(sel as u32)
+    }
+}
+
+unsafe fn set_edit_masked(edit: HWND, masked: bool) {
+    let ch = if masked { b'*' as usize } else { 0 };
+    let _ = SendMessageW(edit, EM_SETPASSWORDCHAR, WPARAM(ch), LPARAM(0));
+    let _ = InvalidateRect(edit, None, true);
+}
+
+unsafe fn apply_key_reveal_ui(hwnd: HWND) {
+    let revealed = KEYS_REVEALED.load(Ordering::SeqCst);
+    let p = Provider::from_u32(DRAFT_PROVIDER.load(Ordering::SeqCst));
+    if let Ok(edit) = GetDlgItem(hwnd, IDC_KEY1 as i32) {
+        set_edit_masked(edit, !revealed);
+    }
+    if let Ok(btn) = GetDlgItem(hwnd, IDC_KEY1_SHOW as i32) {
+        let _ = ShowWindow(btn, SW_SHOW);
+    }
+    if let Ok(edit) = GetDlgItem(hwnd, IDC_KEY2 as i32) {
+        set_edit_masked(edit, p.needs_key2() && !revealed);
+    }
+}
+
 unsafe fn flush_keys_to_draft(hwnd: HWND) {
     let p = Provider::from_u32(DRAFT_PROVIDER.load(Ordering::SeqCst));
     let k1 = get_edit_text(hwnd, IDC_KEY1);
@@ -1131,8 +1269,74 @@ unsafe fn flush_keys_to_draft(hwnd: HWND) {
             Provider::Baidu => g.baidu = (k1, k2),
             Provider::Tencent => g.tencent = (k1, k2),
             Provider::Aliyun => g.aliyun = (k1, k2),
+            Provider::DeepSeekFlash | Provider::DeepSeekPro => g.deepseek = (k1, String::new()),
         }
     }
+}
+
+unsafe fn flush_ocr_keys_to_draft(hwnd: HWND) {
+    let k1 = get_edit_text(hwnd, IDC_OCR_KEY1);
+    let k2 = get_edit_text(hwnd, IDC_OCR_KEY2);
+    if let Ok(mut g) = OCR_CRED_DRAFT.lock() {
+        *g = (k1, k2);
+    }
+}
+
+unsafe fn apply_ocr_key_reveal_ui(hwnd: HWND) {
+    let show = DRAFT_OCR_PROVIDER.load(Ordering::SeqCst) == OcrProvider::Baidu.as_u32();
+    let revealed = OCR_KEYS_REVEALED.load(Ordering::SeqCst);
+    if let Ok(edit) = GetDlgItem(hwnd, IDC_OCR_KEY1 as i32) {
+        set_edit_masked(edit, show && !revealed);
+    }
+    if let Ok(edit) = GetDlgItem(hwnd, IDC_OCR_KEY2 as i32) {
+        set_edit_masked(edit, show && !revealed);
+    }
+}
+
+unsafe fn refresh_ocr_provider_ui(hwnd: HWND) {
+    let p = OcrProvider::from_u32(DRAFT_OCR_PROVIDER.load(Ordering::SeqCst));
+    let baidu = p == OcrProvider::Baidu;
+    let show_baidu = if baidu { SW_SHOW } else { SW_HIDE };
+    let show_system = if baidu { SW_HIDE } else { SW_SHOW };
+    for id in [
+        IDC_OCR_KEY1_LABEL,
+        IDC_OCR_KEY1,
+        IDC_OCR_KEYS_SHOW,
+        IDC_OCR_KEY2_LABEL,
+        IDC_OCR_KEY2,
+        IDC_OCR_HELP,
+    ] {
+        if let Ok(ctrl) = GetDlgItem(hwnd, id as i32) {
+            let _ = ShowWindow(ctrl, show_baidu);
+        }
+    }
+    if let Ok(hint) = GetDlgItem(hwnd, IDC_OCR_HINT as i32) {
+        let _ = ShowWindow(hint, show_system);
+    }
+
+    let (k1, k2) = if let Ok(g) = OCR_CRED_DRAFT.lock() {
+        g.clone()
+    } else {
+        (String::new(), String::new())
+    };
+    set_ctrl_text(hwnd, IDC_OCR_KEY1, &k1);
+    set_ctrl_text(hwnd, IDC_OCR_KEY2, &k2);
+    apply_ocr_key_reveal_ui(hwnd);
+    let _ = InvalidateRect(hwnd, None, true);
+}
+
+unsafe fn open_ocr_help_url() {
+    // 文字识别 → 应用列表（创建应用后可直接看到 API Key / Secret Key）
+    let url = "https://console.bce.baidu.com/ai/#/ai/ocr/app/list";
+    let tw: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = ShellExecuteW(
+        None,
+        w!("open"),
+        PCWSTR(tw.as_ptr()),
+        None,
+        None,
+        SW_SHOWNORMAL,
+    );
 }
 
 unsafe fn refresh_provider_ui(hwnd: HWND) {
@@ -1140,6 +1344,14 @@ unsafe fn refresh_provider_ui(hwnd: HWND) {
     set_ctrl_text(hwnd, IDC_KEY1_LABEL, p.key1_label());
     set_ctrl_text(hwnd, IDC_KEY2_LABEL, p.key2_label());
     set_ctrl_text(hwnd, IDC_HELP_HINT, p.help_hint());
+
+    let show_key2 = if p.needs_key2() { SW_SHOW } else { SW_HIDE };
+    if let Ok(lab) = GetDlgItem(hwnd, IDC_KEY2_LABEL as i32) {
+        let _ = ShowWindow(lab, show_key2);
+    }
+    if let Ok(edit) = GetDlgItem(hwnd, IDC_KEY2 as i32) {
+        let _ = ShowWindow(edit, show_key2);
+    }
 
     let links = p.help_links();
     if let Some((text, _)) = links.first() {
@@ -1165,12 +1377,14 @@ unsafe fn refresh_provider_ui(hwnd: HWND) {
             Provider::Baidu => g.baidu.clone(),
             Provider::Tencent => g.tencent.clone(),
             Provider::Aliyun => g.aliyun.clone(),
+            Provider::DeepSeekFlash | Provider::DeepSeekPro => g.deepseek.clone(),
         }
     } else {
         (String::new(), String::new())
     };
     set_ctrl_text(hwnd, IDC_KEY1, &k1);
     set_ctrl_text(hwnd, IDC_KEY2, &k2);
+    apply_key_reveal_ui(hwnd);
 
     if let Ok(hint) = GetDlgItem(hwnd, IDC_HELP_HINT as i32) {
         let _ = InvalidateRect(hint, None, true);
@@ -1252,16 +1466,30 @@ unsafe fn refresh_buttons(hwnd: HWND) {
 
 unsafe fn collect_save_opts(hwnd: HWND) -> config::SaveOpts {
     flush_keys_to_draft(hwnd);
+    flush_ocr_keys_to_draft(hwnd);
     let provider = current_provider(hwnd);
     DRAFT_PROVIDER.store(provider.as_u32(), Ordering::SeqCst);
-    let (baidu, tencent, aliyun) = if let Ok(g) = CRED_DRAFT.lock() {
-        (g.baidu.clone(), g.tencent.clone(), g.aliyun.clone())
+    let ocr_provider = current_ocr_provider(hwnd);
+    DRAFT_OCR_PROVIDER.store(ocr_provider.as_u32(), Ordering::SeqCst);
+    let (baidu, tencent, aliyun, deepseek) = if let Ok(g) = CRED_DRAFT.lock() {
+        (
+            g.baidu.clone(),
+            g.tencent.clone(),
+            g.aliyun.clone(),
+            g.deepseek.clone(),
+        )
     } else {
         (
             (String::new(), String::new()),
             (String::new(), String::new()),
             (String::new(), String::new()),
+            (String::new(), String::new()),
         )
+    };
+    let (baidu_ocr_api_key, baidu_ocr_secret_key) = if let Ok(g) = OCR_CRED_DRAFT.lock() {
+        g.clone()
+    } else {
+        (String::new(), String::new())
     };
     config::SaveOpts {
         wake: DRAFT_WAKE.load(Ordering::SeqCst),
@@ -1279,12 +1507,16 @@ unsafe fn collect_save_opts(hwnd: HWND) -> config::SaveOpts {
         toast_pos: current_toast_pos(hwnd),
         ui_theme: config::ui_theme(),
         provider,
+        ocr_provider,
         baidu_app_id: baidu.0,
         baidu_secret: baidu.1,
         tencent_secret_id: tencent.0,
         tencent_secret_key: tencent.1,
         aliyun_access_key_id: aliyun.0,
         aliyun_access_key_secret: aliyun.1,
+        deepseek_api_key: deepseek.0,
+        baidu_ocr_api_key,
+        baidu_ocr_secret_key,
     }
 }
 
@@ -1732,10 +1964,24 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 || GetDlgItem(hwnd, IDC_HELP_LINK2 as i32)
                     .ok()
                     .filter(|h| *h == ctrl)
+                    .is_some()
+                || GetDlgItem(hwnd, IDC_OCR_HELP as i32)
+                    .ok()
+                    .filter(|h| *h == ctrl)
+                    .is_some();
+            let is_muted = GetDlgItem(hwnd, IDC_OCR_HINT as i32)
+                .ok()
+                .filter(|h| *h == ctrl)
+                .is_some()
+                || GetDlgItem(hwnd, IDC_HELP_HINT as i32)
+                    .ok()
+                    .filter(|h| *h == ctrl)
                     .is_some();
             let _ = SetBkMode(hdc, TRANSPARENT);
             if is_link {
                 let _ = SetTextColor(hdc, COLORREF(colors.link));
+            } else if is_muted {
+                let _ = SetTextColor(hdc, COLORREF(colors.muted));
             } else {
                 let _ = SetTextColor(hdc, COLORREF(colors.text));
             }
@@ -1770,6 +2016,10 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 || GetDlgItem(hwnd, IDC_HELP_LINK2 as i32)
                     .ok()
                     .filter(|h| *h == ctrl)
+                    .is_some()
+                || GetDlgItem(hwnd, IDC_OCR_HELP as i32)
+                    .ok()
+                    .filter(|h| *h == ctrl)
                     .is_some();
             if is_link {
                 if let Ok(hand) = LoadCursorW(None, IDC_HAND) {
@@ -1797,15 +2047,38 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 open_help_url(hwnd, 1);
                 return LRESULT(0);
             }
+            if id as isize == IDC_OCR_HELP && code == 0 {
+                open_ocr_help_url();
+                return LRESULT(0);
+            }
             if id as isize == IDC_PROVIDER && code == CBN_SELCHANGE {
                 flush_keys_to_draft(hwnd);
                 let p = current_provider(hwnd);
                 DRAFT_PROVIDER.store(p.as_u32(), Ordering::SeqCst);
+                KEYS_REVEALED.store(false, Ordering::SeqCst);
                 refresh_provider_ui(hwnd);
+                return LRESULT(0);
+            }
+            if id as isize == IDC_OCR_PROVIDER && code == CBN_SELCHANGE {
+                flush_ocr_keys_to_draft(hwnd);
+                let p = current_ocr_provider(hwnd);
+                DRAFT_OCR_PROVIDER.store(p.as_u32(), Ordering::SeqCst);
+                OCR_KEYS_REVEALED.store(false, Ordering::SeqCst);
+                refresh_ocr_provider_ui(hwnd);
                 return LRESULT(0);
             }
 
             match id as isize {
+                IDC_KEY1_SHOW => {
+                    let next = !KEYS_REVEALED.load(Ordering::SeqCst);
+                    KEYS_REVEALED.store(next, Ordering::SeqCst);
+                    apply_key_reveal_ui(hwnd);
+                }
+                IDC_OCR_KEYS_SHOW => {
+                    let next = !OCR_KEYS_REVEALED.load(Ordering::SeqCst);
+                    OCR_KEYS_REVEALED.store(next, Ordering::SeqCst);
+                    apply_ocr_key_reveal_ui(hwnd);
+                }
                 IDC_SETTINGS_BTN => {
                     CAPTURE_MODE.store(5, Ordering::SeqCst);
                     refresh_buttons(hwnd);
@@ -1905,6 +2178,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                             Provider::Baidu => g.baidu.clone(),
                             Provider::Tencent => g.tencent.clone(),
                             Provider::Aliyun => g.aliyun.clone(),
+                            Provider::DeepSeekFlash | Provider::DeepSeekPro => g.deepseek.clone(),
                         }
                     } else {
                         (String::new(), String::new())

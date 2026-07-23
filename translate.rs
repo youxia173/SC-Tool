@@ -1,7 +1,8 @@
-//! 统一翻译入口：百度 / 腾讯云 / 阿里云
+//! 统一翻译入口：百度 / 腾讯云 / 阿里云 / DeepSeek
 
-use crate::{aliyun, baidu, chatfmt, config, tencent};
+use crate::{aliyun, baidu, chatfmt, config, deepseek, tencent};
 use crate::config::Provider;
+use crate::deepseek::DeepSeekModel;
 
 /// 把引擎返回的英文/混杂报错整理成面向用户的中文说明
 pub fn friendly_error(err: &str) -> String {
@@ -14,6 +15,14 @@ pub fn friendly_error(err: &str) -> String {
         return "翻译请求过于频繁，超过腾讯云每秒调用次数限制，请稍后再试".into();
     }
     err.to_string()
+}
+
+fn deepseek_model(p: Provider) -> Option<DeepSeekModel> {
+    match p {
+        Provider::DeepSeekFlash => Some(DeepSeekModel::Flash),
+        Provider::DeepSeekPro => Some(DeepSeekModel::Pro),
+        _ => None,
+    }
 }
 
 /// 按当前配置的引擎，中文 → 英文
@@ -35,6 +44,11 @@ fn zh_to_en_raw(text: &str) -> Result<String, String> {
         Provider::Aliyun => {
             let (id, secret) = config::aliyun_credentials();
             aliyun::translate_zh_to_en(text, &id, &secret)
+        }
+        Provider::DeepSeekFlash | Provider::DeepSeekPro => {
+            let key = config::deepseek_api_key();
+            let model = deepseek_model(provider).unwrap();
+            deepseek::translate_zh_to_en(text, &key, model)
         }
     }
 }
@@ -59,6 +73,11 @@ fn en_to_zh_raw(text: &str) -> Result<String, String> {
             let (id, secret) = config::aliyun_credentials();
             aliyun::translate_en_to_zh(text, &id, &secret)
         }
+        Provider::DeepSeekFlash | Provider::DeepSeekPro => {
+            let key = config::deepseek_api_key();
+            let model = deepseek_model(provider).unwrap();
+            deepseek::translate_en_to_zh(text, &key, model)
+        }
     }
 }
 
@@ -67,41 +86,25 @@ pub fn en_to_zh_chat(en: &str) -> Result<(String, String), String> {
     let lines = chatfmt::split_player_messages(en);
     let en_fmt = chatfmt::join_chat_lines(&lines, false);
 
-    // 识别不到多条玩家发言时，整段翻译后再做一次分行兜底
-    let named = lines.iter().filter(|l| l.name.is_some()).count();
-    if named < 2 {
+    // 只要识别到玩家名，就只翻译正文，避免 youxia173 → 尤霞173 这类误译
+    let has_named = lines.iter().any(|l| l.name.is_some());
+    if !has_named {
         let zh = en_to_zh(&en_fmt)?;
         return Ok((en_fmt, chatfmt::format_player_chat(&zh)));
     }
 
     let mut zh_lines = Vec::with_capacity(lines.len());
     for line in &lines {
-        match &line.name {
-            Some(name) => {
-                let msg = line.message.trim();
-                let zh_msg = if msg.is_empty() {
-                    String::new()
-                } else {
-                    en_to_zh(msg)?
-                };
-                zh_lines.push(chatfmt::ChatLine {
-                    name: Some(name.clone()),
-                    message: zh_msg,
-                });
-            }
-            None => {
-                let msg = line.message.trim();
-                let zh_msg = if msg.is_empty() {
-                    String::new()
-                } else {
-                    en_to_zh(msg)?
-                };
-                zh_lines.push(chatfmt::ChatLine {
-                    name: None,
-                    message: zh_msg,
-                });
-            }
-        }
+        let msg = line.message.trim();
+        let zh_msg = if msg.is_empty() {
+            String::new()
+        } else {
+            en_to_zh(msg)?
+        };
+        zh_lines.push(chatfmt::ChatLine {
+            name: line.name.clone(),
+            message: zh_msg,
+        });
     }
     Ok((en_fmt, chatfmt::join_chat_lines(&zh_lines, true)))
 }
@@ -116,6 +119,10 @@ pub fn zh_to_en_with(
         Provider::Baidu => baidu::translate_zh_to_en(text, key1, key2),
         Provider::Tencent => tencent::translate_zh_to_en(text, key1, key2),
         Provider::Aliyun => aliyun::translate_zh_to_en(text, key1, key2),
+        Provider::DeepSeekFlash => {
+            deepseek::translate_zh_to_en(text, key1, DeepSeekModel::Flash)
+        }
+        Provider::DeepSeekPro => deepseek::translate_zh_to_en(text, key1, DeepSeekModel::Pro),
     }
     .map_err(|e| friendly_error(&e))
 }

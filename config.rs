@@ -10,6 +10,8 @@ pub enum Provider {
     Baidu = 0,
     Tencent = 1,
     Aliyun = 2,
+    DeepSeekFlash = 3,
+    DeepSeekPro = 4,
 }
 
 impl Provider {
@@ -17,6 +19,8 @@ impl Provider {
         match v {
             1 => Self::Tencent,
             2 => Self::Aliyun,
+            3 => Self::DeepSeekFlash,
+            4 => Self::DeepSeekPro,
             _ => Self::Baidu,
         }
     }
@@ -30,6 +34,8 @@ impl Provider {
             Self::Baidu => "baidu",
             Self::Tencent => "tencent",
             Self::Aliyun => "aliyun",
+            Self::DeepSeekFlash => "deepseek_flash",
+            Self::DeepSeekPro => "deepseek_pro",
         }
     }
 
@@ -37,16 +43,30 @@ impl Provider {
         match s.trim().to_ascii_lowercase().as_str() {
             "tencent" | "qq" | "tmt" => Self::Tencent,
             "aliyun" | "ali" | "alimt" => Self::Aliyun,
+            "deepseek_pro" | "deepseek-pro" | "ds_pro" => Self::DeepSeekPro,
+            "deepseek_flash" | "deepseek-flash" | "ds_flash" | "deepseek" | "ds" => {
+                Self::DeepSeekFlash
+            }
             _ => Self::Baidu,
         }
     }
 
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::Baidu => "百度翻译",
-            Self::Tencent => "腾讯云翻译",
-            Self::Aliyun => "阿里云翻译",
+            Self::Baidu => "百度翻译（免费）",
+            Self::Tencent => "腾讯云翻译（免费）",
+            Self::Aliyun => "阿里云翻译（免费）",
+            Self::DeepSeekFlash => "DeepSeek Flash（付费）",
+            Self::DeepSeekPro => "DeepSeek Pro（付费）",
         }
+    }
+
+    pub fn is_deepseek(self) -> bool {
+        matches!(self, Self::DeepSeekFlash | Self::DeepSeekPro)
+    }
+
+    pub fn needs_key2(self) -> bool {
+        !self.is_deepseek()
     }
 
     pub fn key1_label(self) -> &'static str {
@@ -54,6 +74,7 @@ impl Provider {
             Self::Baidu => "APP ID",
             Self::Tencent => "SecretId",
             Self::Aliyun => "AccessKeyId",
+            Self::DeepSeekFlash | Self::DeepSeekPro => "API Key",
         }
     }
 
@@ -62,6 +83,7 @@ impl Provider {
             Self::Baidu => "密钥",
             Self::Tencent => "SecretKey",
             Self::Aliyun => "AccessKeySecret",
+            Self::DeepSeekFlash | Self::DeepSeekPro => "（无需填写）",
         }
     }
 
@@ -75,6 +97,12 @@ impl Provider {
             }
             Self::Aliyun => {
                 "免费额度：通用版文本翻译每月 100 万字符\n请按顺序完成：开通机器翻译 → 创建 AccessKey"
+            }
+            Self::DeepSeekFlash => {
+                "DeepSeek Flash：便宜快速，适合日常聊天翻译\n按 token 计费，国内直连；Flash/Pro 共用同一把 API Key"
+            }
+            Self::DeepSeekPro => {
+                "DeepSeek Pro：更强更贵，适合难句\n按 token 计费，国内直连；Flash/Pro 共用同一把 API Key"
             }
         }
     }
@@ -112,6 +140,58 @@ impl Provider {
                     "https://ram.console.aliyun.com/manage/ak",
                 ),
             ],
+            Self::DeepSeekFlash | Self::DeepSeekPro => &[
+                (
+                    "1. 开通 DeepSeek API 并获取 API Key",
+                    "https://platform.deepseek.com/api_keys",
+                ),
+                (
+                    "2. 查看模型与价格",
+                    "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+                ),
+            ],
+        }
+    }
+}
+
+/// OCR 引擎：本地系统 / 百度云高精度
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum OcrProvider {
+    System = 0,
+    Baidu = 1,
+}
+
+impl OcrProvider {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Baidu,
+            _ => Self::System,
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    pub fn cfg_name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Baidu => "baidu",
+        }
+    }
+
+    pub fn from_cfg(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "baidu" | "百度" | "cloud" => Self::Baidu,
+            _ => Self::System,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::System => "系统OCR（免费）",
+            Self::Baidu => "百度OCR（付费）",
         }
     }
 }
@@ -253,6 +333,7 @@ pub static UI_THEME: AtomicU32 = AtomicU32::new(UiTheme::Dark as u32);
 /// 测试模式（仅运行时，不写配置；设置窗口输入秘籍开启）
 pub static TEST_MODE: AtomicBool = AtomicBool::new(false);
 pub static TRANSLATE_PROVIDER: AtomicU32 = AtomicU32::new(0);
+pub static OCR_PROVIDER: AtomicU32 = AtomicU32::new(0);
 
 static BAIDU_APP_ID: Mutex<String> = Mutex::new(String::new());
 static BAIDU_SECRET: Mutex<String> = Mutex::new(String::new());
@@ -260,6 +341,9 @@ static TENCENT_SECRET_ID: Mutex<String> = Mutex::new(String::new());
 static TENCENT_SECRET_KEY: Mutex<String> = Mutex::new(String::new());
 static ALIYUN_AK_ID: Mutex<String> = Mutex::new(String::new());
 static ALIYUN_AK_SECRET: Mutex<String> = Mutex::new(String::new());
+static DEEPSEEK_API_KEY: Mutex<String> = Mutex::new(String::new());
+static BAIDU_OCR_API_KEY: Mutex<String> = Mutex::new(String::new());
+static BAIDU_OCR_SECRET_KEY: Mutex<String> = Mutex::new(String::new());
 static CHAT_RECT: Mutex<ChatRect> = Mutex::new(ChatRect::empty());
 
 /// 屏幕坐标下的聊天区矩形（一次框选，可重选）。
@@ -317,12 +401,16 @@ pub fn load() {
     let mut toast_pos = ToastPos::Below;
     let mut ui_theme = UiTheme::Dark;
     let mut provider = Provider::Baidu;
+    let mut ocr_provider = OcrProvider::System;
     let mut baidu_id = String::new();
     let mut baidu_secret = String::new();
     let mut tc_id = String::new();
     let mut tc_key = String::new();
     let mut ali_id = String::new();
     let mut ali_secret = String::new();
+    let mut deepseek_key = String::new();
+    let mut baidu_ocr_ak = String::new();
+    let mut baidu_ocr_sk = String::new();
     let mut chat = ChatRect::empty();
 
     for line in text.lines() {
@@ -387,6 +475,8 @@ pub fn load() {
             ui_theme = UiTheme::from_cfg(v);
         } else if let Some(v) = line.strip_prefix("translate_provider=") {
             provider = Provider::from_cfg(v);
+        } else if let Some(v) = line.strip_prefix("ocr_provider=") {
+            ocr_provider = OcrProvider::from_cfg(v);
         } else if let Some(v) = line.strip_prefix("baidu_app_id=") {
             baidu_id = unescape_cfg(v.trim());
         } else if let Some(v) = line.strip_prefix("baidu_secret=") {
@@ -399,6 +489,12 @@ pub fn load() {
             ali_id = unescape_cfg(v.trim());
         } else if let Some(v) = line.strip_prefix("aliyun_access_key_secret=") {
             ali_secret = unescape_cfg(v.trim());
+        } else if let Some(v) = line.strip_prefix("deepseek_api_key=") {
+            deepseek_key = unescape_cfg(v.trim());
+        } else if let Some(v) = line.strip_prefix("baidu_ocr_api_key=") {
+            baidu_ocr_ak = unescape_cfg(v.trim());
+        } else if let Some(v) = line.strip_prefix("baidu_ocr_secret_key=") {
+            baidu_ocr_sk = unescape_cfg(v.trim());
         } else if let Some(v) = line.strip_prefix("chat_left=") {
             if let Ok(n) = v.trim().parse() {
                 chat.left = n;
@@ -438,12 +534,16 @@ pub fn load() {
     TOAST_POS.store(toast_pos.as_u32(), Ordering::SeqCst);
     UI_THEME.store(ui_theme.as_u32(), Ordering::SeqCst);
     TRANSLATE_PROVIDER.store(provider.as_u32(), Ordering::SeqCst);
+    OCR_PROVIDER.store(ocr_provider.as_u32(), Ordering::SeqCst);
     set_mutex(&BAIDU_APP_ID, baidu_id);
     set_mutex(&BAIDU_SECRET, baidu_secret);
     set_mutex(&TENCENT_SECRET_ID, tc_id);
     set_mutex(&TENCENT_SECRET_KEY, tc_key);
     set_mutex(&ALIYUN_AK_ID, ali_id);
     set_mutex(&ALIYUN_AK_SECRET, ali_secret);
+    set_mutex(&DEEPSEEK_API_KEY, deepseek_key);
+    set_mutex(&BAIDU_OCR_API_KEY, baidu_ocr_ak);
+    set_mutex(&BAIDU_OCR_SECRET_KEY, baidu_ocr_sk);
     if let Ok(mut g) = CHAT_RECT.lock() {
         *g = chat;
     }
@@ -508,12 +608,16 @@ pub struct SaveOpts {
     pub toast_pos: ToastPos,
     pub ui_theme: UiTheme,
     pub provider: Provider,
+    pub ocr_provider: OcrProvider,
     pub baidu_app_id: String,
     pub baidu_secret: String,
     pub tencent_secret_id: String,
     pub tencent_secret_key: String,
     pub aliyun_access_key_id: String,
     pub aliyun_access_key_secret: String,
+    pub deepseek_api_key: String,
+    pub baidu_ocr_api_key: String,
+    pub baidu_ocr_secret_key: String,
 }
 
 pub fn save(opts: SaveOpts) -> Result<(), String> {
@@ -544,26 +648,37 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
         }
     }
     if opts.bilingual {
-        let (k1, k2, name) = match opts.provider {
-            Provider::Baidu => (
-                opts.baidu_app_id.trim(),
-                opts.baidu_secret.trim(),
-                "百度 APP ID / 密钥",
-            ),
-            Provider::Tencent => (
-                opts.tencent_secret_id.trim(),
-                opts.tencent_secret_key.trim(),
-                "腾讯云 SecretId / SecretKey",
-            ),
-            Provider::Aliyun => (
-                opts.aliyun_access_key_id.trim(),
-                opts.aliyun_access_key_secret.trim(),
-                "阿里云 AccessKey",
-            ),
+        let ok = match opts.provider {
+            Provider::Baidu => {
+                !opts.baidu_app_id.trim().is_empty() && !opts.baidu_secret.trim().is_empty()
+            }
+            Provider::Tencent => {
+                !opts.tencent_secret_id.trim().is_empty()
+                    && !opts.tencent_secret_key.trim().is_empty()
+            }
+            Provider::Aliyun => {
+                !opts.aliyun_access_key_id.trim().is_empty()
+                    && !opts.aliyun_access_key_secret.trim().is_empty()
+            }
+            Provider::DeepSeekFlash | Provider::DeepSeekPro => {
+                !opts.deepseek_api_key.trim().is_empty()
+            }
         };
-        if k1.is_empty() || k2.is_empty() {
+        if !ok {
+            let name = match opts.provider {
+                Provider::Baidu => "百度 APP ID / 密钥",
+                Provider::Tencent => "腾讯云 SecretId / SecretKey",
+                Provider::Aliyun => "阿里云 AccessKey",
+                Provider::DeepSeekFlash | Provider::DeepSeekPro => "DeepSeek API Key",
+            };
             return Err(format!("开启双语发送时，请填写当前引擎的{name}"));
         }
+    }
+
+    if opts.ocr_provider == OcrProvider::Baidu
+        && (opts.baidu_ocr_api_key.trim().is_empty() || opts.baidu_ocr_secret_key.trim().is_empty())
+    {
+        return Err("选择百度 OCR 时，请填写百度 OCR 的 API Key / Secret Key".into());
     }
 
     let path = config_path();
@@ -587,12 +702,16 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
         opts.toast_pos,
         opts.ui_theme,
         opts.provider,
+        opts.ocr_provider,
         opts.baidu_app_id.trim(),
         opts.baidu_secret.trim(),
         opts.tencent_secret_id.trim(),
         opts.tencent_secret_key.trim(),
         opts.aliyun_access_key_id.trim(),
         opts.aliyun_access_key_secret.trim(),
+        opts.deepseek_api_key.trim(),
+        opts.baidu_ocr_api_key.trim(),
+        opts.baidu_ocr_secret_key.trim(),
         chat_rect(),
     )?;
 
@@ -611,12 +730,16 @@ pub fn save(opts: SaveOpts) -> Result<(), String> {
     TOAST_POS.store(opts.toast_pos.as_u32(), Ordering::SeqCst);
     UI_THEME.store(opts.ui_theme.as_u32(), Ordering::SeqCst);
     TRANSLATE_PROVIDER.store(opts.provider.as_u32(), Ordering::SeqCst);
+    OCR_PROVIDER.store(opts.ocr_provider.as_u32(), Ordering::SeqCst);
     set_mutex(&BAIDU_APP_ID, opts.baidu_app_id.trim().to_string());
     set_mutex(&BAIDU_SECRET, opts.baidu_secret.trim().to_string());
     set_mutex(&TENCENT_SECRET_ID, opts.tencent_secret_id.trim().to_string());
     set_mutex(&TENCENT_SECRET_KEY, opts.tencent_secret_key.trim().to_string());
     set_mutex(&ALIYUN_AK_ID, opts.aliyun_access_key_id.trim().to_string());
     set_mutex(&ALIYUN_AK_SECRET, opts.aliyun_access_key_secret.trim().to_string());
+    set_mutex(&DEEPSEEK_API_KEY, opts.deepseek_api_key.trim().to_string());
+    set_mutex(&BAIDU_OCR_API_KEY, opts.baidu_ocr_api_key.trim().to_string());
+    set_mutex(&BAIDU_OCR_SECRET_KEY, opts.baidu_ocr_secret_key.trim().to_string());
     Ok(())
 }
 
@@ -637,16 +760,20 @@ fn write_cfg_file(
     toast_pos: ToastPos,
     ui_theme: UiTheme,
     provider: Provider,
+    ocr_provider: OcrProvider,
     baidu_id: &str,
     baidu_secret: &str,
     tc_id: &str,
     tc_key: &str,
     ali_id: &str,
     ali_secret: &str,
+    deepseek_key: &str,
+    baidu_ocr_ak: &str,
+    baidu_ocr_sk: &str,
     chat: ChatRect,
 ) -> Result<(), String> {
     let body = format!(
-        "wake_vk={}\nshot_vk={}\npick_vk={}\nocr_vk={}\nsettings_vk={}\ntoast={}\nsound={}\nbilingual={}\ntoast_bg={:06X}\ntoast_fg={:06X}\ntoast_alpha={}\ntoast_secs={}\ntoast_pos={}\nui_theme={}\ntranslate_provider={}\nbaidu_app_id={}\nbaidu_secret={}\ntencent_secret_id={}\ntencent_secret_key={}\naliyun_access_key_id={}\naliyun_access_key_secret={}\nchat_left={}\nchat_top={}\nchat_width={}\nchat_height={}\n",
+        "wake_vk={}\nshot_vk={}\npick_vk={}\nocr_vk={}\nsettings_vk={}\ntoast={}\nsound={}\nbilingual={}\ntoast_bg={:06X}\ntoast_fg={:06X}\ntoast_alpha={}\ntoast_secs={}\ntoast_pos={}\nui_theme={}\ntranslate_provider={}\nocr_provider={}\nbaidu_app_id={}\nbaidu_secret={}\ntencent_secret_id={}\ntencent_secret_key={}\naliyun_access_key_id={}\naliyun_access_key_secret={}\ndeepseek_api_key={}\nbaidu_ocr_api_key={}\nbaidu_ocr_secret_key={}\nchat_left={}\nchat_top={}\nchat_width={}\nchat_height={}\n",
         wake,
         shot,
         pick,
@@ -662,12 +789,16 @@ fn write_cfg_file(
         toast_pos.cfg_name(),
         ui_theme.cfg_name(),
         provider.cfg_name(),
+        ocr_provider.cfg_name(),
         escape_cfg(baidu_id),
         escape_cfg(baidu_secret),
         escape_cfg(tc_id),
         escape_cfg(tc_key),
         escape_cfg(ali_id),
         escape_cfg(ali_secret),
+        escape_cfg(deepseek_key),
+        escape_cfg(baidu_ocr_ak),
+        escape_cfg(baidu_ocr_sk),
         chat.left,
         chat.top,
         chat.width,
@@ -692,6 +823,8 @@ pub fn set_chat_rect(rect: ChatRect) -> Result<(), String> {
     let (baidu_id, baidu_secret) = baidu_credentials();
     let (tc_id, tc_key) = tencent_credentials();
     let (ali_id, ali_secret) = aliyun_credentials();
+    let deepseek_key = deepseek_api_key();
+    let (ocr_ak, ocr_sk) = baidu_ocr_credentials();
     write_cfg_file(
         &path,
         WAKE_VK.load(Ordering::SeqCst),
@@ -709,12 +842,16 @@ pub fn set_chat_rect(rect: ChatRect) -> Result<(), String> {
         toast_pos(),
         ui_theme(),
         translate_provider(),
+        ocr_provider(),
         &baidu_id,
         &baidu_secret,
         &tc_id,
         &tc_key,
         &ali_id,
         &ali_secret,
+        &deepseek_key,
+        &ocr_ak,
+        &ocr_sk,
         rect,
     )
 }
@@ -775,6 +912,8 @@ pub fn set_ui_theme(theme: UiTheme) -> Result<(), String> {
     let (baidu_id, baidu_secret) = baidu_credentials();
     let (tc_id, tc_key) = tencent_credentials();
     let (ali_id, ali_secret) = aliyun_credentials();
+    let deepseek_key = deepseek_api_key();
+    let (ocr_ak, ocr_sk) = baidu_ocr_credentials();
     write_cfg_file(
         &path,
         WAKE_VK.load(Ordering::SeqCst),
@@ -792,12 +931,16 @@ pub fn set_ui_theme(theme: UiTheme) -> Result<(), String> {
         toast_pos(),
         theme,
         translate_provider(),
+        ocr_provider(),
         &baidu_id,
         &baidu_secret,
         &tc_id,
         &tc_key,
         &ali_id,
         &ali_secret,
+        &deepseek_key,
+        &ocr_ak,
+        &ocr_sk,
         chat_rect(),
     )
 }
@@ -830,6 +973,10 @@ pub fn translate_provider() -> Provider {
     Provider::from_u32(TRANSLATE_PROVIDER.load(Ordering::SeqCst))
 }
 
+pub fn ocr_provider() -> OcrProvider {
+    OcrProvider::from_u32(OCR_PROVIDER.load(Ordering::SeqCst))
+}
+
 pub fn baidu_credentials() -> (String, String) {
     (get_mutex(&BAIDU_APP_ID), get_mutex(&BAIDU_SECRET))
 }
@@ -840,6 +987,17 @@ pub fn tencent_credentials() -> (String, String) {
 
 pub fn aliyun_credentials() -> (String, String) {
     (get_mutex(&ALIYUN_AK_ID), get_mutex(&ALIYUN_AK_SECRET))
+}
+
+pub fn deepseek_api_key() -> String {
+    get_mutex(&DEEPSEEK_API_KEY)
+}
+
+pub fn baidu_ocr_credentials() -> (String, String) {
+    (
+        get_mutex(&BAIDU_OCR_API_KEY),
+        get_mutex(&BAIDU_OCR_SECRET_KEY),
+    )
 }
 
 pub fn config_path() -> PathBuf {

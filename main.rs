@@ -16,12 +16,15 @@ mod config;
 mod settings;
 mod toast;
 mod baidu;
+mod baidu_ocr;
 mod tencent;
 mod aliyun;
+mod deepseek;
 mod translate;
 mod region;
 mod ocr;
 mod chatfmt;
+mod simpconv;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -38,7 +41,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 显示名称（托盘 / 菜单 / 窗口标题）
-const APP_TITLE: &str = "SC 小工具v1.3.0";
+const APP_TITLE: &str = "SC 小工具v1.4.0";
 
 // ============ 你唯一需要改的地方 ============
 
@@ -667,24 +670,30 @@ unsafe fn do_pick_chat_region(_owner: HWND) {
 }
 
 unsafe fn do_ocr_chat_region(_owner: HWND) {
+    let ocr_src = config::ocr_provider().display_name();
+    let trans_src = config::translate_provider().display_name();
+    let sources = format!("识别：{ocr_src}｜翻译：{trans_src}");
     match ocr::recognize_chat_region() {
         Ok(en) => match translate::en_to_zh_chat(&en) {
             Ok((en_fmt, zh)) => {
                 let clip = format!("{en_fmt}\n\n{zh}");
                 let _ = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &clip);
-                toast::show_above_chat_rect(&format!("{zh}\n（已复制原文+译文）"), true);
+                toast::show_above_chat_rect(
+                    &format!("{zh}\n（已复制原文+译文）\n{sources}"),
+                    true,
+                );
             }
             Err(e) => {
                 let en_fmt = chatfmt::format_player_chat(&en);
                 let _ = clipboard_win::set_clipboard(clipboard_win::formats::Unicode, &en_fmt);
                 toast::show_above_chat_rect(
-                    &format!("{en_fmt}\n（翻译失败: {e}，已复制英文）"),
+                    &format!("{en_fmt}\n（翻译失败: {e}，已复制英文）\n{sources}"),
                     false,
                 );
             }
         },
         Err(e) => {
-            toast::show_above_chat_rect(&e, false);
+            toast::show_above_chat_rect(&format!("{e}\n识别：{ocr_src}"), false);
         }
     }
 }
@@ -846,11 +855,13 @@ unsafe fn do_send_and_close(text: &str) {
     let edit = load(&EDIT_HWND);
     let main = load(&MAIN_HWND);
     let game = load(&GAME_HWND);
-    let zh_payload = translate(text);
+    // 台湾等繁体输入先本地转简体，再走 IME 词表 / 双语翻译（不调用网络 API）
+    let text = simpconv::to_simplified(text);
+    let zh_payload = translate(&text);
 
     // 双语：先请求翻译（可能稍慢），失败则仅发中文并提示
     let en_line = if config::bilingual_enabled() {
-        match translate::zh_to_en(text) {
+        match translate::zh_to_en(&text) {
             Ok(en) => Some(format!("[en] {en}")),
             Err(e) => {
                 if config::test_mode_enabled() {
